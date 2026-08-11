@@ -1,0 +1,18 @@
+// Cloudflare Workers deploy config. Static assets only — there is no Worker
+// code here, so no "main" entry point. Without this file `wrangler deploy`
+// finds nothing to deploy, falls back to sniffing the project, and dies with
+// "Error parsing file: vite.config.js".
+{
+  "name": "hisaab",
+  "compatibility_date": "2026-08-12",
+  "assets": {
+    "directory": "./dist",
+    // Any path the bundle does not have a file for returns index.html with a
+    // 200. The app never changes the URL path — every screen is a history
+    // entry pushed onto "/" — so the only path this actually catches is
+    // /share-target, which is what vercel.json used to rewrite. It matters
+    // for the window before the service worker is installed; after that,
+    // public/share-target.js intercepts the POST and this is never reached.
+    "not_found_handling": "single-page-application"
+  }
+}
