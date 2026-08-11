@@ -11,7 +11,12 @@ const CATEGORIES = [
   'Household Help', 'Transfers', 'Income', 'Other',
 ]
 
-const MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash'
+// An alias, not a pinned version, on purpose: gemini-2.5-flash was retired for
+// new keys mid-build and every call 404'd. Drift is harmless here because the
+// model's category is snapped to CATEGORIES below regardless of what it says.
+// Pin it with GEMINI_MODEL if a specific version ever matters.
+// `node scripts/list-models.mjs` shows what this key can actually call.
+const MODEL = process.env.GEMINI_MODEL || 'gemini-flash-lite-latest'
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).end()
@@ -24,6 +29,7 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'merchants must be short strings' })
   }
   if (!process.env.GEMINI_API_KEY) {
+    console.error('[categorise] GEMINI_API_KEY is not set')
     return res.status(200).json({ results: [] }) // fail soft, not loud
   }
 
@@ -57,6 +63,14 @@ Input: ${JSON.stringify(merchants)}`
     clearTimeout(timer)
 
     const data = await r.json()
+    // Fail soft to the caller, but never silently to the operator — this is the
+    // difference between "no key", "quota spent" and "model renamed", and the
+    // client can't tell them apart from an empty array.
+    if (!r.ok || data?.error) {
+      console.error(`[categorise] ${MODEL} returned ${r.status}:`, data?.error?.message ?? data)
+      return res.status(200).json({ results: [] })
+    }
+
     const text = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '[]'
     const parsed = JSON.parse(text.replace(/```json|```/g, '').trim())
 
@@ -70,9 +84,10 @@ Input: ${JSON.stringify(merchants)}`
       }))
 
     return res.status(200).json({ results })
-  } catch {
+  } catch (e) {
     // Fail soft: unknown merchants stay uncategorised and get picked up in the
     // weekly cleanup. Never block a save on the AI.
+    console.error('[categorise]', e?.message ?? e)
     return res.status(200).json({ results: [] })
   }
 }
