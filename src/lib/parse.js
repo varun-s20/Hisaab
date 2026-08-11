@@ -254,12 +254,19 @@ export function parse(text, now = new Date()) {
 // HISTORY-LIST SCREENSHOTS
 //
 // Written against real OCR output (screenshots/ocr-output.txt, 11 Aug 2026).
-// The real screenshots are not single-payment receipts — they're the Paytm
-// "Payment History" screen, roughly seven transactions per shot:
+// The real screenshots are not single-payment receipts — they're the in-app
+// transaction *history* screens, roughly seven transactions per shot:
 //
-//     & Kunafa Mahal -394              ← name + amount, ₹ misread as 3/%/¥
-//     Paid Yesterday, 11:01 PM From A  ← verb, date, time, account
-//     @ Food                           ← Paytm's own category
+//   Paytm    & Kunafa Mahal -394               name + amount
+//            Paid Yesterday, 11:01 PM From A   verb, date, time, account
+//            @ Food                            Paytm's own category
+//
+//   GPay     (E Eazy Diner Private Limited 3837
+//            7 August
+//
+//   PhonePe  Received from
+//            ¥ Dad +%25,000
+//            31 Jul Credited to Paytm
 //
 // That's strictly better than receipts: one tap yields seven rows instead of
 // one, the list contains transactions you never thought to screenshot, and
@@ -268,16 +275,48 @@ export function parse(text, now = new Date()) {
 // finds no list anchors.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const LIST_HEADER = /payment history|balance\s?&?\s?history|total spent/i
+// Matched against the *chrome* of the history screen, never the app's name —
+// a single-payment receipt says "Google Pay" too, and must fall through to the
+// receipt parser rather than be read as a one-row list.
+const LIST_APPS = [
+  { app: 'gpay', test: /search transactions|payment method/i },
+  { app: 'phonepe', test: /my statements|credited to|debited from/i },
+  { app: 'paytm', test: /payment history|balance\s?&?\s?history|total spent/i },
+]
 
-// "Paid Today, 07:18 AM", "Sent on 04 Aug, 01:31 PM", "Received Yesterday, ..."
+function detectListApp(text) {
+  return LIST_APPS.find((a) => a.test.test(text))?.app ?? null
+}
+
+// Paytm: "Paid Today, 07:18 AM", "Sent on 04 Aug, 01:31 PM"
 const ANCHOR =
   /^[-\s]*(Paid|Sent|Received)\s+(?:(Today|Yesterday)|on\s+(\d{1,2})\s+([A-Za-z]{3,9}))\s*,?\s*(\d{1,2}:\d{2})?\s*(AM|PM)?/i
 
-// The rupee sign lands as %, 3, ¥, ? or © depending on the render. It is always
-// exactly one glyph between the sign and the digits, which is what makes this
-// safe: `-394` is ₹94, and `-31,883.64` is ₹1,883.64, not thirty-one thousand.
-const LIST_AMOUNT = /([-+])\s*[%3¥₹?2SZ*©$]\s?([\d][\d,]*(?:\.\d{1,2})?)\s*$/
+// GPay and PhonePe: a bare date line — "9 August", "31 Jul Credited to Paytm".
+// Up to four characters of avatar junk may precede it ("W@W 9 August").
+const DATE_ANCHOR = /^.{0,4}?(\d{1,2})\s+([A-Za-z]{3,9})\b/
+
+// THE RUPEE SIGN IS ONE CHARACTER, ALWAYS.
+//
+// Tesseract's `eng` model has no ₹ in its charset, so it substitutes the
+// nearest shape — %, 3, 2, 7, ¥, ©, S — but it always emits exactly one
+// character for it, immediately after any sign. Verified character-by-character
+// against the bounding boxes of all three apps:
+//
+//   -394      → ₹94        (Paytm, glyph read as 3)
+//   3837      → ₹837       (GPay debit, no sign, glyph read as 3)
+//   21136     → ₹1,136     (GPay, glyph read as 2)
+//   +%25,000  → ₹25,000    (PhonePe, glyph read as %)
+//   71,650    → ₹1,650     (PhonePe, glyph read as 7)
+//
+// So: drop one character, whatever it is. Do not try to be clever about which
+// characters "look like" a rupee sign — that list is unbounded, and treating
+// the glyph as a digit multiplies the amount by ten.
+//
+// The glyph class excludes + and − so the sign can't be mistaken for it. Without
+// that, "+3580" matches with glyph='+' and amount=3580 — a credit of ₹580 read
+// as a debit of ₹3,580, wrong twice over.
+const LIST_AMOUNT = /([-+])?\s*([^+\-\s])((?:\d[\d,]*)(?:\.\d{1,2})?)\s*$/
 
 // Paytm's own labels. Local, free, and better than anything an LLM would guess.
 const PAYTM_CATEGORY = {
@@ -309,13 +348,20 @@ const PAYTM_CATEGORY = {
 const MONTH_HEADER =
   /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+(20\d{2})\b/i
 
-/** Strip the avatar glyph or initials Paytm prefixes to every row. */
+/**
+ * Every app prefixes each row with an avatar, and OCR renders it as junk:
+ * "IC", "gr)", "(E", "¥", "W@W". Strip a leading token when it's initials
+ * (1–2 letters) or contains punctuation — but keep real short words, so
+ * "The Coffee Bean" survives while "Ms Shyam Departmental Store" loses its
+ * two-letter prefix.
+ */
 function stripAvatar(name) {
-  return name
-    .replace(/^[^A-Za-z0-9]+/, '')
-    .replace(/^[A-Za-z]{1,2}\s+(?=[A-Z0-9])/, '')
-    .replace(/\s{2,}/g, ' ')
-    .trim()
+  let out = String(name ?? '').replace(/^[^A-Za-z0-9]+/, '')
+  const token = out.match(/^(\S{1,3})\s+(?=[A-Za-z0-9])/)
+  if (token && (/^[A-Za-z]{1,2}$/.test(token[1]) || /[^A-Za-z0-9]/.test(token[1]))) {
+    out = out.slice(token[0].length)
+  }
+  return out.replace(/\s{2,}/g, ' ').trim()
 }
 
 /**
@@ -335,31 +381,68 @@ function categoryLabel(line) {
 // Wrapped mandate copy, not part of the merchant name.
 const NOT_NAME = /^(?:[-~\s]*automatic payment|payment(?:\s+of\b|$)|setup$|\d[\d,]*\s*setup)/i
 
-// A trailing sign-and-glyph with no digits: the amount the OCR lost.
-const BROKEN_AMOUNT = /[-+]\s*[%3¥₹?2SZ*©$]?\s*$/
+// A trailing sign and at most one more character, with no number after it:
+// the amount the OCR lost. Only applied when nothing matched LIST_AMOUNT, so a
+// real amount is never eaten by this.
+const BROKEN_AMOUNT = /[-+]\s*.?\s*$/
+
+// A bare year on its own line — GPay stacks "2026" above the month name.
+const YEAR_LINE = /^\W*(20\d{2})\W*$/
+
+/**
+ * Match the amount at the end of a row.
+ *
+ * Rejects a line that is nothing *but* a number with no sign — that's a year
+ * header or a month total, not a payment. A real row always has the merchant
+ * name to the left of the amount, or an explicit + / −.
+ */
+function matchAmount(line) {
+  const m = line.match(LIST_AMOUNT)
+  if (!m) return null
+  if (m.index === 0 && !m[1]) return null
+  return m
+}
+
+/** The verb sits on the amount line (Paytm) or the line above it (PhonePe). */
+const VERB = /(received from|credited|money received|paid to|sent to|debited|paid|sent)/i
 
 export function parseHistory(text, now = new Date()) {
+  const app = detectListApp(text) ?? 'unknown'
+  const paytm = app === 'paytm'
   const lines = text.split('\n').map((l) => l.trim()).filter(Boolean)
-  const headerYear = Number(text.match(MONTH_HEADER)?.[2]) || null
+
+  // Year context. Paytm states it once ("August 2026"); GPay and PhonePe repeat
+  // it per month section, so it has to be tracked as we walk down the screen.
+  let year = Number(text.match(MONTH_HEADER)?.[2]) || null
 
   const rows = []
   for (let i = 0; i < lines.length; i++) {
-    const a = lines[i].match(ANCHOR)
-    if (!a) continue
+    const yearOnly = lines[i].match(YEAR_LINE)
+    if (yearOnly) year = Number(yearOnly[1])
+    const monthHeader = lines[i].match(MONTH_HEADER)
+    if (monthHeader) year = Number(monthHeader[2])
+
+    // Anchor: the line carrying this row's date.
+    const a = paytm ? lines[i].match(ANCHOR) : null
+    const b = paytm ? null : matchDateLine(lines[i])
+    if (!a && !b) continue
 
     // Walk back to the line carrying the amount — that's the merchant line.
     let head = -1
     let fallbackHead = -1
     for (let j = i - 1; j >= 0 && j >= i - 4; j--) {
-      if (ANCHOR.test(lines[j])) break // ran into the previous transaction
-      if (LIST_AMOUNT.test(lines[j])) {
+      if (paytm ? ANCHOR.test(lines[j]) : matchDateLine(lines[j])) break // previous row
+      // A month or year header. "August 2026" would otherwise read as ₹26, and
+      // a month total as a payment.
+      if (YEAR_LINE.test(lines[j]) || MONTH_HEADER.test(lines[j])) break
+      if (matchAmount(lines[j])) {
         head = j
         break
       }
       // The previous transaction's category label — stop, or its name bleeds
       // into this row.
       if (PAYTM_CATEGORY[categoryLabel(lines[j])]) break
-      if (fallbackHead === -1 && !NOT_NAME.test(lines[j])) fallbackHead = j
+      if (fallbackHead === -1 && !NOT_NAME.test(lines[j]) && !VERB.test(lines[j])) fallbackHead = j
     }
 
     // No amount on any line above? The OCR mangled it — a mandate line reading
@@ -368,9 +451,8 @@ export function parseHistory(text, now = new Date()) {
     // without anyone noticing.
     if (head === -1 && fallbackHead === -1) continue
 
-    const m = head === -1 ? null : lines[head].match(LIST_AMOUNT)
-    const amount = m ? toNumber(m[2]) : null
-    const signCredit = m?.[1] === '+'
+    const m = head === -1 ? null : matchAmount(lines[head])
+    const amount = m ? toNumber(m[3]) : null // m[2] is the rupee glyph, discarded
 
     const nameStart = head === -1 ? fallbackHead : head
     let payee_raw = stripAvatar(
@@ -382,16 +464,24 @@ export function parseHistory(text, now = new Date()) {
       if (extra.length >= 2) payee_raw = `${payee_raw} ${extra}`.trim()
     }
 
-    const verb = a[1].toLowerCase()
-    const direction = verb === 'received' || signCredit ? 'credit' : 'debit'
+    // Direction: the sign wins, then the verb. GPay writes debits with no sign
+    // at all, so absence of a sign is not evidence of anything.
+    const verbLine = a ? lines[i] : (lines[nameStart - 1] ?? '') + ' ' + lines[nameStart]
+    const verb = verbLine.match(VERB)?.[1]?.toLowerCase() ?? ''
+    const credit = m?.[1] === '+' || /received|credited/.test(verb)
 
-    const txn_date = a[2]
-      ? extractDate(a[2], now)
-      : listDate(Number(a[3]), a[4], headerYear, now)
-    const txn_time = a[5] ? extractTime(`${a[5]} ${a[6] ?? ''}`) : null
+    const txn_date = a
+      ? a[2]
+        ? extractDate(a[2], now)
+        : listDate(Number(a[3]), a[4], year, now)
+      : listDate(Number(b[1]), b[2], year, now)
+    const txn_time = a?.[5] ? extractTime(`${a[5]} ${a[6] ?? ''}`) : null
 
     // Paytm's label sits on the line after the date, prefixed with an icon.
-    const hint = PAYTM_CATEGORY[categoryLabel(lines[i + 1])] ?? null
+    const hint = paytm ? (PAYTM_CATEGORY[categoryLabel(lines[i + 1])] ?? null) : null
+
+    // "Credited to Paytm" / "Debited from HDFC" — which pocket it moved through.
+    const account = lines[i].match(/(?:credited to|debited from)\s+([A-Za-z]+)/i)?.[1] ?? null
 
     let confidence = 1.0
     if (!amount) confidence -= 0.6
@@ -400,15 +490,16 @@ export function parseHistory(text, now = new Date()) {
     confidence = Math.max(0, Math.round(confidence * 100) / 100)
 
     rows.push({
-      app: 'paytm',
+      app,
       amount,
-      direction,
+      direction: credit ? 'credit' : 'debit',
       payee_raw: payee_raw || null,
       txn_date,
       txn_time,
       txn_ref: null, // the list view shows none; db.js synthesises one
       category_hint: hint,
-      method: 'paytm',
+      method: app === 'unknown' ? null : app,
+      account,
       source: 'screenshot',
       confidence,
       needs_review: confidence < 0.7,
@@ -418,13 +509,21 @@ export function parseHistory(text, now = new Date()) {
   return rows
 }
 
-/** "09 Aug" with no year — take it from the screen header, or infer. */
+/** "9 August", "31 Jul Credited to Paytm" — GPay and PhonePe row dates. */
+function matchDateLine(line) {
+  const m = line.match(DATE_ANCHOR)
+  if (!m) return null
+  if (MONTHS[m[2].slice(0, 3).toLowerCase()] === undefined) return null
+  return m
+}
+
+/** A day and a month name with no year — take the year from the screen. */
 function listDate(day, monthName, headerYear, now) {
   const mon = MONTHS[monthName.slice(0, 3).toLowerCase()]
   if (mon === undefined) return null
-  let year = headerYear ?? now.getFullYear()
+  const year = headerYear ?? now.getFullYear()
   let d = new Date(year, mon, day)
-  // A list dated after today means the year rolled over (Dec rows under a
+  // A list dated after today means the year rolled over (December rows under a
   // January header), not a payment from the future.
   if (d.getTime() > now.getTime() + 86400000) d = new Date(year - 1, mon, day)
   if (d.getDate() !== day || d.getMonth() !== mon) return null
@@ -436,8 +535,11 @@ function listDate(day, monthName, headerYear, now) {
  * History screens yield many rows; a single receipt yields one.
  */
 export function parseScreenshot(text, now = new Date()) {
-  if (LIST_HEADER.test(text)) {
+  if (detectListApp(text)) {
     const rows = parseHistory(text, now)
+    // A list row whose amount the OCR lost still belongs to the list — it goes
+    // to review. Only a screen with no rows at all is worth re-reading as a
+    // receipt.
     if (rows.length > 0) return rows
   }
   return [parse(text, now)]

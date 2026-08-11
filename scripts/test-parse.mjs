@@ -172,6 +172,79 @@ check('a row whose amount the OCR lost is flagged, not dropped', () => {
   assert.equal(rows[0].needs_review, true)
 })
 
+// Verbatim OCR of a real GPay history screen. Note "August" came out "aoe",
+// the year sits on its own line, and debits carry no sign at all.
+const GPAY = `2:16 RT |
+& Search transactions $ :
+Status ~ Payment method ~ Date ~
+2026
+aoe +398,381
+gr) Yasharth Saxena +3580
+W@W 9 August
+(E Eazy Diner Private Limited 3837
+7 August
+(E Eazydiner Private Limited 21136
+5 August
+O Mehta chetan +350,000
+a 3 August`
+
+check('GPay history: unsigned rows are debits, signed rows are credits', () => {
+  const rows = parseScreenshot(GPAY, NOW)
+  assert.deepEqual(
+    rows.map((r) => [r.payee_raw, r.direction, r.amount]),
+    [
+      ['Yasharth Saxena', 'credit', 580],
+      ['Eazy Diner Private Limited', 'debit', 837],
+      ['Eazydiner Private Limited', 'debit', 1136],
+      ['Mehta chetan', 'credit', 50000],
+    ],
+  )
+})
+
+check('GPay: the year comes from a line of its own', () => {
+  const rows = parseScreenshot(GPAY, NOW)
+  assert.deepEqual(rows.map((r) => r.txn_date), [
+    '2026-08-09', '2026-08-07', '2026-08-05', '2026-08-03',
+  ])
+})
+
+check('a month total is not a transaction', () => {
+  // "aoe +398,381" is August's header. It must not become a ₹98,381 payment.
+  const rows = parseScreenshot(GPAY, NOW)
+  assert.equal(rows.some((r) => r.amount === 98381), false)
+})
+
+const PHONEPE = `History © My Statements
+July 2026
+Received from
+¥ Dad +%25,000
+31 Jul Credited to Paytm
+May 2026
+Received from
+¥ Dad + 71,650
+12 May Credited to Paytm`
+
+check('PhonePe history: month sections carry the year', () => {
+  const rows = parseScreenshot(PHONEPE, NOW)
+  assert.deepEqual(
+    rows.map((r) => [r.payee_raw, r.direction, r.amount, r.txn_date, r.account]),
+    [
+      ['Dad', 'credit', 25000, '2026-07-31', 'Paytm'],
+      ['Dad', 'credit', 1650, '2026-05-12', 'Paytm'],
+    ],
+  )
+})
+
+check('the rupee glyph is one character, whatever it OCRs as', () => {
+  // Same amount, three renderings of ₹ seen across the three apps.
+  const of = (line, date) =>
+    parseScreenshot(`Payment History\nAugust 2026\n${line}\nPaid on 09 Aug, 10:11 PM`, date)[0].amount
+  assert.equal(of('X Shop -%1,650', NOW), 1650) // read as %
+  assert.equal(of('X Shop -31,650', NOW), 1650) // read as 3
+  assert.equal(of('X Shop -71,650', NOW), 1650) // read as 7
+  assert.equal(of('X Shop -₹1,650', NOW), 1650) // read correctly
+})
+
 check('two identical amounts on one day stay two rows', () => {
   const a = { txn_date: '2026-08-01', txn_time: '20:42:00', amount: 50, payee_raw: 'Swiggy Diners' }
   const b = { ...a, txn_time: '22:26:00' }
