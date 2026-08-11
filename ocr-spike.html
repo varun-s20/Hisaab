@@ -1,0 +1,42 @@
+<!doctype html>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Paisa — OCR spike</title>
+<!--
+  BUILD_GUIDE.md §6.1. Standalone, no build step. Open this on the actual
+  phone (host it however — `npx serve .`, or push it anywhere) and feed it real
+  GPay / PhonePe / Paytm screenshots.
+
+  This output is the specification for every parser. `npm run ocr` does the same
+  thing on the desktop against ./screenshots; this file exists for checking that
+  the phone's own screenshots OCR the same way.
+-->
+<style>
+  body { background:#0E1012; color:#E8E6E1; font:15px -apple-system,system-ui,sans-serif; margin:0; padding:20px }
+  input { width:100% }
+  pre { white-space:pre-wrap; font:12px ui-monospace,monospace; color:#8A8F94; border-top:1px solid #262A2E; padding-top:12px }
+  .h { color:#E8A33D }
+</style>
+
+<h3>OCR spike</h3>
+<input type="file" accept="image/*" multiple id="f">
+<p id="status"></p>
+<pre id="out"></pre>
+
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@6/dist/tesseract.min.js"></script>
+<script>
+document.getElementById('f').onchange = async (e) => {
+  const out = document.getElementById('out')
+  const status = document.getElementById('status')
+  const files = [...e.target.files]
+  status.textContent = 'Loading engine (~10MB first time)…'
+  const worker = await Tesseract.createWorker('eng')
+  let i = 0
+  for (const file of files) {
+    status.textContent = `Reading ${++i} of ${files.length}…`
+    const { data } = await worker.recognize(file)
+    out.innerHTML += `<span class="h">===== ${file.name} =====</span>\n${data.text}\n`
+  }
+  await worker.terminate()
+  status.textContent = `Done. ${files.length} image(s). Long-press the text to copy.`
+}
+</script>

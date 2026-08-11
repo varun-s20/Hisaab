@@ -1,0 +1,307 @@
+/* Paisa — cool ink, warm money. BUILD_GUIDE.md §9.
+   Opened once a day, at night, one-handed, for under two minutes.
+   It is a ledger, not a dashboard. */
+
+:root {
+  --ink: #0e1012;
+  --surface: #181b1e;
+  --surface-2: #1f2327;
+  --rule: #262a2e;
+  --text: #e8e6e1;
+  --muted: #8a8f94;
+  --out: #e8a33d; /* debits — warm gold, reads as currency */
+  --in: #6fb3a0; /* credits — deliberately quieter than out */
+  --alert: #d9634f;
+
+  --pad: 20px;
+  --radius: 12px;
+
+  /* ponytail: system stack, no webfont request. Roboto/SF/Segoe all ship
+     tabular figures, which is the only typographic thing that matters here. */
+  --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root { height: 100%; }
+
+body {
+  margin: 0;
+  background: var(--ink);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  overscroll-behavior-y: none;
+}
+
+button, input, select, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; }
+
+/* Amounts. Non-negotiable: columns of rupee figures that don't align look amateur. */
+.num {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum' 1, 'lnum' 1;
+  letter-spacing: -0.01em;
+}
+.rupee {
+  font-size: 0.78em;
+  vertical-align: 0.08em;
+  margin-right: 0.12em;
+  opacity: 0.75;
+}
+
+.out { color: var(--out); }
+.in { color: var(--in); }
+.alert { color: var(--alert); }
+.muted { color: var(--muted); }
+
+/* ── Shell ───────────────────────────────────────────────────────────────── */
+.app {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+  max-width: 520px;
+  margin: 0 auto;
+  padding-bottom: calc(64px + env(safe-area-inset-bottom));
+}
+
+.screen {
+  flex: 1;
+  padding: calc(env(safe-area-inset-top) + 18px) var(--pad) 24px;
+  animation: rise 0.22s ease-out;
+}
+
+@keyframes rise {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
+}
+
+.eyebrow {
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0 0 6px;
+}
+
+h1.title { font-size: 21px; font-weight: 600; margin: 0 0 18px; }
+h2.section { font-size: 13px; font-weight: 600; color: var(--muted); margin: 28px 0 10px; }
+
+/* ── Nav ─────────────────────────────────────────────────────────────────── */
+.nav {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  justify-content: center;
+  gap: 4px;
+  padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
+  background: color-mix(in srgb, var(--ink) 88%, transparent);
+  backdrop-filter: blur(12px);
+  border-top: 1px solid var(--rule);
+  z-index: 20;
+}
+.nav button {
+  flex: 1;
+  max-width: 120px;
+  background: none;
+  border: 0;
+  padding: 9px 4px;
+  font-size: 12px;
+  color: var(--muted);
+  border-radius: 8px;
+}
+.nav button[aria-current='true'] { color: var(--text); background: var(--surface); }
+.nav .badge {
+  display: inline-block;
+  min-width: 16px;
+  margin-left: 5px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--alert);
+  color: var(--ink);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+/* ── Hero total ──────────────────────────────────────────────────────────── */
+.hero { text-align: center; padding: 26px 0 8px; }
+.hero .amount { font-size: 46px; font-weight: 300; line-height: 1.05; }
+.hero .label { color: var(--muted); font-size: 14px; margin-top: 6px; }
+
+/* ── Buttons ─────────────────────────────────────────────────────────────── */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  padding: 15px 18px;
+  border: 0;
+  border-radius: var(--radius);
+  background: var(--out);
+  color: var(--ink);
+  font-size: 16px;
+  font-weight: 600;
+  transition: opacity 0.15s, transform 0.1s;
+}
+.btn:active { transform: scale(0.985); }
+.btn:disabled { opacity: 0.5; }
+.btn.ghost {
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--rule);
+  font-weight: 500;
+}
+.btn.small { width: auto; padding: 9px 14px; font-size: 14px; border-radius: 9px; }
+
+.linkish {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--muted);
+  font-size: 14px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+/* ── Ledger rows: hairlines, no cards, no shadows ────────────────────────── */
+.ledger { margin: 0; padding: 0; list-style: none; }
+.row {
+  display: grid;
+  grid-template-columns: 8px 1fr auto;
+  align-items: baseline;
+  gap: 10px;
+  padding: 13px 0;
+  border-bottom: 1px solid var(--rule);
+  text-align: left;
+  width: 100%;
+  background: none;
+  border-left: 0;
+  border-right: 0;
+  border-top: 0;
+}
+.row .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  align-self: center;
+  background: var(--muted);
+}
+.row .who { min-width: 0; }
+.row .name {
+  font-size: 15px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.row .meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.row .amt { font-size: 15px; text-align: right; white-space: nowrap; }
+/* A select sitting in the amount column sizes to its content, not the row. */
+.row select { width: auto; min-width: 132px; padding: 8px 10px; font-size: 13px; }
+
+.row.flagged .name::after {
+  content: '·';
+  color: var(--alert);
+  margin-left: 6px;
+  font-weight: 700;
+}
+
+.daygroup { margin-top: 22px; }
+.daygroup > .head {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--muted);
+  padding-bottom: 6px;
+}
+
+/* ── Day strip: the signature element ────────────────────────────────────── */
+.strip {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 46px;
+  margin: 4px 0 10px;
+}
+.strip .bar {
+  flex: 1;
+  min-height: 2px;
+  border-radius: 1px;
+  background: var(--rule);
+  transition: background 0.15s;
+}
+.strip .bar.has { background: color-mix(in srgb, var(--out) 55%, transparent); }
+.strip .bar.today { background: var(--out); }
+.strip .bar.sel { background: var(--text); }
+.strip .bar.weekend { opacity: 0.72; }
+.striplabels {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* ── Cards / panels (used sparingly) ─────────────────────────────────────── */
+.panel {
+  background: var(--surface);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-bottom: 12px;
+}
+.stat { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+.stat + .stat { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--rule); }
+.stat .k { color: var(--muted); font-size: 13px; }
+.stat .v { font-size: 17px; }
+
+/* ── Forms ───────────────────────────────────────────────────────────────── */
+.field { display: block; margin-bottom: 14px; }
+.field > span { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+input[type='text'],
+input[type='email'],
+input[type='number'],
+input[type='date'],
+input[type='time'],
+select,
+textarea {
+  width: 100%;
+  padding: 12px 13px;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  outline: none;
+}
+input:focus, select:focus, textarea:focus { border-color: var(--muted); }
+select { appearance: none; background-image: none; }
+
+/* ── Progress ────────────────────────────────────────────────────────────── */
+.progress { height: 3px; background: var(--rule); border-radius: 2px; overflow: hidden; }
+.progress > i { display: block; height: 100%; background: var(--out); transition: width 0.2s; }
+
+.empty { color: var(--muted); padding: 34px 0; text-align: center; font-size: 15px; }
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(78px + env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  background: var(--surface-2);
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  padding: 11px 16px;
+  font-size: 14px;
+  max-width: 90vw;
+  z-index: 30;
+  animation: rise 0.2s ease-out;
+}
+
+.hidden-file { display: none; }

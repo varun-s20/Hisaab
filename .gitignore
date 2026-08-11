@@ -1,0 +1,13 @@
+node_modules
+dist
+dist-ssr
+.vercel
+.env
+.env.local
+*.local
+
+# Screenshots and OCR dumps never leave this machine.
+screenshots/*
+!screenshots/README.md
+
+.DS_Store
