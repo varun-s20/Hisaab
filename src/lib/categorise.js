@@ -5,9 +5,14 @@ import { normalise, seedLookup, TYPE_FOR_CATEGORY } from './seeds'
 // The cascade, in order — stop at the first hit:
 //   1. merchant map      (Supabase, cached; a correction the user made outranks all)
 //   2. the app's own tag (Paytm labels every row: Food, Money Transfer, …)
-//   3. personal check    (local regex — a bare name or UPI handle is a transfer)
-//   4. seed rules        (hardcoded brands)
+//   3. seed rules        (hardcoded brands — local, so no reason to rank below 4)
+//   4. personal check    (local regex — a bare name or UPI handle is a transfer)
 //   5. Gemini            (one batched call, merchant strings only)
+//
+// Seeds sit above the personal check because plenty of brands read as people:
+// "Swiggy Diners" and "Kunafa Mahal" both match a Firstname-Lastname regex.
+// Ranked the other way, a ₹1,978 dinner is silently typed as a transfer and
+// vanishes from every spending total.
 //
 // The app's own tag sits above the personal check on purpose. Half of Indian
 // merchants ARE people — the chaiwala, the sabziwala, the man who fixes your
@@ -37,7 +42,13 @@ export function clearMapCache() {
 function typeFor(category, direction) {
   // Transfers are money moving, never spending — in either direction.
   if (category === 'Transfers') return direction === 'credit' ? 'repaid' : 'transfer'
-  if (direction === 'credit') return 'income'
+  if (direction === 'credit') {
+    // Only call it income when something actually said so. An unrecognised
+    // credit is usually a friend paying you back, and "income" is a much
+    // stronger claim than "transfer". Both stay out of spending totals, and the
+    // row is flagged for review either way — so default to the quieter one.
+    return category === 'Income' ? 'income' : 'transfer'
+  }
   return TYPE_FOR_CATEGORY[category] ?? 'expense'
 }
 
@@ -64,13 +75,13 @@ export async function categoriseBatch(txns) {
       payee_clean = hit.payee_clean
     } else if (t.category_hint) {
       category = t.category_hint
+    } else if (seedLookup(t.payee_raw)) {
+      category = seedLookup(t.payee_raw)
     } else if (personal) {
       // Your friends' names stay on your phone. No lookup, no network.
       category = 'Transfers'
-    } else {
-      const seed = seedLookup(t.payee_raw)
-      if (seed) category = seed
-      else if (key) unknown.set(key, t.payee_raw)
+    } else if (key) {
+      unknown.set(key, t.payee_raw)
     }
 
     out.push({ ...t, category, payee_clean, _key: key, _personal: personal })

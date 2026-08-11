@@ -45,7 +45,9 @@ export default function App() {
   }, [session, refreshCounts])
 
   if (session === undefined) return <div className="screen" />
-  if (!session) return <SignIn />
+  // Inside .app so the sign-in column matches the rest of the app on a desktop
+  // window instead of stretching the full width.
+  if (!session) return <div className="app" style={{ paddingBottom: 0 }}><SignIn /></div>
 
   const goReview = () => setTab('review')
 

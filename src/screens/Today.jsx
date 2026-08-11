@@ -70,7 +70,9 @@ export default function Today({ onChange, reviewCount, goReview }) {
           <span className="rupee">₹</span>
           {money(total)}
         </div>
-        <div className="label">{total > 0 ? 'spent today' : 'Nothing logged today.'}</div>
+        {/* "logged", not "spent" — ₹0 means nothing was entered, which is not
+            the same claim as having spent nothing. */}
+        <div className="label">logged today</div>
       </div>
 
       <input

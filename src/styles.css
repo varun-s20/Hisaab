@@ -198,6 +198,10 @@ h2.section { font-size: 13px; font-weight: 600; color: var(--muted); margin: 28p
   background: var(--muted);
 }
 .row .who { min-width: 0; }
+/* .who's children are spans in some screens, divs in others — force the stack
+   either way, or the timestamp runs into the merchant name. */
+.row .name,
+.row .meta { display: block; }
 .row .name {
   font-size: 15px;
   white-space: nowrap;

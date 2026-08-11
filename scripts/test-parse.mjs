@@ -7,6 +7,7 @@ import {
   parse, toNumber, extractDate, extractDirection, extractPayee,
   isPersonal, detectApp, synthRef, parseScreenshot,
 } from '../src/lib/parse.js'
+import { seedLookup } from '../src/lib/seeds.js'
 
 const NOW = new Date(2026, 7, 11) // 11 Aug 2026
 let n = 0
@@ -243,6 +244,14 @@ check('the rupee glyph is one character, whatever it OCRs as', () => {
   assert.equal(of('X Shop -31,650', NOW), 1650) // read as 3
   assert.equal(of('X Shop -71,650', NOW), 1650) // read as 7
   assert.equal(of('X Shop -₹1,650', NOW), 1650) // read correctly
+})
+
+check('a brand that reads like a person is still a brand', () => {
+  // "Swiggy Diners" matches Firstname-Lastname. If the personal check ran
+  // first, a ₹1,978 dinner would be typed as a transfer and vanish from spend.
+  assert.equal(isPersonal('Swiggy Diners'), true)
+  assert.equal(seedLookup('Swiggy Diners'), 'Food & Dining')
+  assert.equal(seedLookup('Mohammad Amaan'), null)
 })
 
 check('two identical amounts on one day stay two rows', () => {
