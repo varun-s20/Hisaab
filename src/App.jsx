@@ -24,14 +24,6 @@ const TABS = [
 
 const SUB = ['review', 'teach', 'import', 'ask', 'budgets', 'merchants']
 
-/**
- * Suspense cannot catch a rejected import, only a pending one. The service
- * worker registers with `autoUpdate` and skipWaiting, so a deploy claims an
- * already-open tab and purges the old precache: the next tap on a lazy screen
- * asks for a chunk that no longer exists, the promise rejects, and the whole
- * tree unmounts to a blank page. A reload always fixes it, and the user has no
- * way to know that — so offer the reload.
- */
 class ScreenBoundary extends Component {
   state = { failed: false }
 
