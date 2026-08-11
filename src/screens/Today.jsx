@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { readBatch, preload } from '../lib/ocr'
 import { parse } from '../lib/parse'
-import { categoriseBatch, persistAILearnings } from '../lib/categorise'
-import { saveTransactions, listTransactions } from '../lib/db'
+import { categoriseBatch, persistAILearnings, learn } from '../lib/categorise'
+import { saveTransactions, listTransactions, updateTransaction } from '../lib/db'
 import { money, today, dayLabel, timeLabel, spendTotal } from '../lib/format'
 import { colorFor, CATEGORIES } from '../lib/categories'
 import ManualEntry from '../components/ManualEntry.jsx'
@@ -196,8 +196,6 @@ function QuickEdit({ r, onDone }) {
 
   async function set(patch, learnIt) {
     setSaving(true)
-    const { updateTransaction } = await import('../lib/db')
-    const { learn } = await import('../lib/categorise')
     await updateTransaction(r.id, { ...patch, needs_review: false })
     if (learnIt) {
       await learn(r.payee_raw, { category: patch.category, payee_clean: r.payee_clean || r.payee_raw })

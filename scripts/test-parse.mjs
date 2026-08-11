@@ -82,4 +82,11 @@ check('synthetic ref is stable for the same payment', () => {
   assert.notEqual(synthRef(a), synthRef({ ...a, amount: 451 }))
 })
 
+// The statement importer ships its own checks; run them from the same command.
+const { selfTest } = await import('../src/lib/statement.js')
+check('statement CSV parser', () => {
+  const failures = selfTest()
+  assert.equal(failures, 0, `${failures} statement check(s) failed`)
+})
+
 console.log(`\n${n} checks passed`)
