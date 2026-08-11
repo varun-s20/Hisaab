@@ -1,4 +1,4 @@
-# Handoff — AI workflows, agents, and the Paisa expense tracker
+# Handoff — AI workflows, agents, and the Hisaab expense tracker
 
 Conversation knowledge base. Dated 11 August 2026.
 Paste this at the start of a new chat to restore full context.
@@ -86,11 +86,11 @@ Key insight: the differentiation is not transcription. It's that the system know
 
 Constraints noted: Zoom requires App Marketplace approval; consent law varies (India needs one-party, EU and several US states need all-party).
 
-**Status: parked.** Revisit after Paisa ships.
+**Status: parked.** Revisit after Hisaab ships.
 
 ---
 
-## 3. The current project — Paisa
+## 3. The current project — Hisaab
 
 **What:** an Android-first PWA. Upload UPI payment screenshots, get a real expense ledger. No manual data entry.
 

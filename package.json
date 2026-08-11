@@ -1,8 +1,11 @@
 {
-  "name": "paisa",
+  "name": "hisaab",
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "engines": {
+    "node": "22.x"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",

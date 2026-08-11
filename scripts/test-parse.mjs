@@ -8,6 +8,7 @@ import {
   isPersonal, detectApp, synthRef, parseScreenshot,
 } from '../src/lib/parse.js'
 import { seedLookup } from '../src/lib/seeds.js'
+import { sanitise, guess } from '../src/lib/query.js'
 
 const NOW = new Date(2026, 7, 11) // 11 Aug 2026
 let n = 0
@@ -281,6 +282,115 @@ const { selfTest } = await import('../src/lib/statement.js')
 check('statement CSV parser', () => {
   const failures = selfTest()
   assert.equal(failures, 0, `${failures} statement check(s) failed`)
+})
+
+// ── Recurring detection ────────────────────────────────────────────────────
+// A false positive here tells you a habit is a subscription and inflates the
+// "committed every month" figure, so both directions are worth pinning.
+const { findRecurring, committedPerMonth } = await import('../src/lib/recurring.js')
+
+const txn = (payee, date, amount, type = 'expense') => ({
+  payee_clean: payee, txn_date: date, amount, type, category: 'Entertainment',
+})
+
+check('a steady monthly charge is recurring', () => {
+  const found = findRecurring([
+    txn('Netflix', '2026-05-14', 649),
+    txn('Netflix', '2026-06-14', 649),
+    txn('Netflix', '2026-07-14', 649),
+  ])
+  assert.equal(found.length, 1)
+  assert.equal(found[0].cadence, 'monthly')
+  assert.equal(found[0].amount, 649)
+  assert.equal(found[0].next, '2026-08-13') // 30 days after the last sighting
+  assert.equal(Math.round(committedPerMonth(found)), 649)
+})
+
+check('a wildly varying amount is a habit, not a bill', () => {
+  assert.equal(
+    findRecurring([
+      txn('Swiggy', '2026-05-14', 1978),
+      txn('Swiggy', '2026-06-14', 15),
+      txn('Swiggy', '2026-07-14', 845),
+    ]).length,
+    0,
+  )
+})
+
+check('a plausible median with erratic gaps is rejected', () => {
+  // Three in one week then one a month later medians to ~monthly and is not.
+  assert.equal(
+    findRecurring([
+      txn('Cafe', '2026-07-01', 200),
+      txn('Cafe', '2026-07-02', 200),
+      txn('Cafe', '2026-08-31', 200),
+    ]).length,
+    0,
+  )
+})
+
+check('two sightings are a coincidence', () => {
+  assert.equal(findRecurring([txn('Gym', '2026-06-01', 1500), txn('Gym', '2026-07-01', 1500)]).length, 0)
+})
+
+check('salary is not a subscription', () => {
+  const salary = ['2026-05-01', '2026-06-01', '2026-07-01'].map((d) => txn('Acme Payroll', d, 90000, 'income'))
+  assert.equal(findRecurring(salary).length, 0)
+})
+
+// ── Ask: the model's spec is untrusted, and the offline reader has to be
+// ── repeatable. Both were wrong in ways nothing on screen looked wrong for.
+
+check('a spec field the model got wrong is dropped, not passed through', () => {
+  const s = sanitise({
+    from: '2026-13-45', // shape is right, the date does not exist
+    to: '2026-08-01',
+    categories: ['Food & Dining', 'Nonsense'],
+    types: ['expense', 'drop-table'],
+    methods: ['gpay', 'unknown-rail'],
+    groupBy: 'merchant; drop',
+    sort: 'whatever',
+    minAmount: '500', // JSON mode returns numbers as strings often enough
+    maxAmount: -3,
+    answer: 'x'.repeat(500),
+  }, { methods: ['gpay'] })
+
+  assert.equal(s.from, null)
+  assert.equal(s.to, '2026-08-01')
+  assert.deepEqual(s.categories, ['Food & Dining'])
+  assert.deepEqual(s.types, ['expense'])
+  assert.deepEqual(s.methods, ['gpay'])
+  assert.equal(s.groupBy, null)
+  assert.equal(s.sort, 'date')
+  assert.equal(s.minAmount, 500)
+  assert.equal(s.maxAmount, null)
+  assert.equal(s.answer.length, 160)
+})
+
+check('one offline question does not leak into the next', () => {
+  const a = guess('how much on food last month')
+  const b = guess('how much on transport this month')
+  assert.deepEqual(a.categories, ['Food & Dining'])
+  assert.deepEqual(b.categories, ['Transport'])
+})
+
+check('a category name is text, not a pattern', () => {
+  // A user-invented "Rent(" used to throw SyntaxError out of new RegExp and
+  // wedge the Ask screen on its spinner with no way back.
+  assert.doesNotThrow(() => guess('what did i spend', { methods: ['gpay('] }))
+})
+
+// ── Statements: a sign is a direction ──────────────────────────────────────
+
+const { parseStatement } = await import('../src/lib/statement.js')
+
+check('a + on a single-amount column is money in', () => {
+  const { rows } = parseStatement(
+    'Date,Description,Amount\n05-08-2026,"UPI RECEIVED FROM RAHUL","+5,000"\n06-08-2026,"SWIGGY","-450"',
+  )
+  assert.equal(rows[0].direction, 'credit')
+  assert.equal(rows[0].amount, 5000)
+  assert.equal(rows[1].direction, 'debit')
 })
 
 console.log(`\n${n} checks passed`)

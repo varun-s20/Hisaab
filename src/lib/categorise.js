@@ -1,4 +1,5 @@
 import { supabase } from './supabase'
+import { postJson } from './api'
 import { isPersonal } from './parse'
 import { normalise, seedLookup, TYPE_FOR_CATEGORY } from './seeds'
 
@@ -30,7 +31,10 @@ export async function loadMerchantMap(force = false) {
   if (!supabase) return mapCache
   const { data, error } = await supabase
     .from('merchant_map')
-    .select('payee_pattern, payee_clean, category, default_type, source')
+    // hit_count is selected because learn() increments it. Left out, `existing`
+    // was always undefined there and every write reset the counter to 1, so the
+    // "what it has learned" list ordered by it never moved off a flat tie.
+    .select('payee_pattern, payee_clean, category, default_type, source, hit_count')
   if (!error) for (const row of data ?? []) mapCache.set(row.payee_pattern, row)
   return mapCache
 }
@@ -112,24 +116,17 @@ export async function categoriseBatch(txns) {
 }
 
 async function askAI(merchants) {
-  try {
-    const r = await fetch('/api/categorise', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ merchants: merchants.slice(0, 50) }),
-    })
-    if (!r.ok) return []
-    const { results } = await r.json()
-    return Array.isArray(results) ? results : []
-  } catch {
-    return [] // Fail soft. Always.
-  }
+  const body = await postJson('/api/categorise', { merchants: merchants.slice(0, 50) })
+  return Array.isArray(body?.results) ? body.results : [] // Fail soft. Always.
 }
 
 /**
- * Remember a categorisation. User corrections always outrank AI guesses —
- * the upsert below never downgrades a `source: 'user'` row because we only
- * write `ai` rows when nothing was there (see aiLearn).
+ * Remember a categorisation. User corrections always outrank AI guesses.
+ *
+ * The in-memory check below is only a fast path: mapCache is loaded once per
+ * session (App.jsx), so a correction made on another device is invisible to it.
+ * The guarantee is `ignoreDuplicates` on the AI write — the database, not the
+ * cache, is what refuses to overwrite a row that already exists.
  */
 export async function learn(payee_raw, { category, payee_clean, source = 'user' }) {
   if (!supabase) return
@@ -149,7 +146,7 @@ export async function learn(payee_raw, { category, payee_clean, source = 'user' 
   }
   const { data } = await supabase
     .from('merchant_map')
-    .upsert(row, { onConflict: 'user_id,payee_pattern' })
+    .upsert(row, { onConflict: 'user_id,payee_pattern', ignoreDuplicates: source === 'ai' })
     .select()
     .maybeSingle()
   if (data) mapCache?.set(payee_pattern, data)

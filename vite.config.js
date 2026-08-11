@@ -11,46 +11,59 @@ import { VitePWA } from 'vite-plugin-pwa'
  * `GEMINI_API_KEY=...` in .env.local is read here and never shipped to a
  * client. Never rename it to VITE_GEMINI_API_KEY — that publishes your key.
  */
+const ROUTES = ['categorise', 'ask']
+
 function devApi(env) {
   return {
-    name: 'paisa-dev-api',
+    name: 'hisaab-dev-api',
     apply: 'serve',
     configureServer(server) {
-      server.middlewares.use('/api/categorise', async (req, res) => {
-        // Match production: falling through to the SPA fallback here would make
-        // a GET return index.html locally and 405 on Vercel.
-        if (req.method !== 'POST') {
-          res.statusCode = 405
-          return res.end()
-        }
-        try {
-          const chunks = []
-          for await (const c of req) chunks.push(c)
-          req.body = JSON.parse(Buffer.concat(chunks).toString() || '{}')
-
-          // Vercel's handler signature, on top of a plain Node response.
-          res.status = (code) => {
-            res.statusCode = code
-            return res
-          }
-          res.json = (body) => {
-            res.setHeader('content-type', 'application/json')
-            res.end(JSON.stringify(body))
-            return res
-          }
-
-          if (env.GEMINI_API_KEY) process.env.GEMINI_API_KEY = env.GEMINI_API_KEY
-          if (env.GEMINI_MODEL) process.env.GEMINI_MODEL = env.GEMINI_MODEL
-
-          const { default: handler } = await import('./api/categorise.js')
-          await handler(req, res)
-        } catch (e) {
-          res.statusCode = 500
-          res.end(JSON.stringify({ error: String(e) }))
-        }
-      })
+      for (const route of ROUTES) devRoute(server, env, route)
     },
   }
+}
+
+function devRoute(server, env, route) {
+  server.middlewares.use(`/api/${route}`, async (req, res) => {
+    // Match production: falling through to the SPA fallback here would make
+    // a GET return index.html locally and 405 on Vercel.
+    if (req.method !== 'POST') {
+      res.statusCode = 405
+      return res.end()
+    }
+    try {
+      const chunks = []
+      for await (const c of req) chunks.push(c)
+      req.body = JSON.parse(Buffer.concat(chunks).toString() || '{}')
+
+      // Vercel's handler signature, on top of a plain Node response.
+      res.status = (code) => {
+        res.statusCode = code
+        return res
+      }
+      res.json = (body) => {
+        res.setHeader('content-type', 'application/json')
+        res.end(JSON.stringify(body))
+        return res
+      }
+
+      if (env.GEMINI_API_KEY) process.env.GEMINI_API_KEY = env.GEMINI_API_KEY
+      if (env.GEMINI_MODEL) process.env.GEMINI_MODEL = env.GEMINI_MODEL
+      // api/_auth.js verifies the caller's Supabase token against the project.
+      // Both of these are public values the browser bundle already carries —
+      // they are here so the dev shim can do the same check production does,
+      // instead of being the one place with no auth at all.
+      for (const k of ['SUPABASE_URL', 'SUPABASE_ANON_KEY', 'VITE_SUPABASE_URL', 'VITE_SUPABASE_ANON_KEY']) {
+        if (env[k]) process.env[k] = env[k]
+      }
+
+      const { default: handler } = await import(`./api/${route}.js`)
+      await handler(req, res)
+    } catch (e) {
+      res.statusCode = 500
+      res.end(JSON.stringify({ error: String(e) }))
+    }
+  })
 }
 
 export default defineConfig(({ mode }) => {
@@ -64,38 +77,84 @@ export default defineConfig(({ mode }) => {
     react(),
     VitePWA({
       registerType: 'autoUpdate',
-      includeAssets: ['icon-192.png', 'icon-512.png', 'apple-touch-icon.png'],
+      includeAssets: [
+        'icon-192.png',
+        'icon-512.png',
+        'icon-maskable-512.png',
+        'apple-touch-icon.png',
+      ],
       manifest: {
-        name: 'Paisa',
-        short_name: 'Paisa',
+        name: 'Hisaab',
+        short_name: 'Hisaab',
         description: 'UPI screenshots in, real ledger out.',
         start_url: '/',
         display: 'standalone',
         orientation: 'portrait',
-        background_color: '#0E1012',
-        theme_color: '#0E1012',
+        // Android's share sheet. Screenshot → Share → Hisaab, without opening
+        // the app first. Handled in public/share-target.js inside the service
+        // worker, so it only works on the installed PWA over HTTPS.
+        share_target: {
+          action: '/share-target',
+          method: 'POST',
+          enctype: 'multipart/form-data',
+          params: {
+            files: [{ name: 'images', accept: ['image/*'] }],
+          },
+        },
+        // The splash is the icon on background_color, so this is the logo's own
+        // field — the icon melts into the splash instead of sitting on a cream
+        // card. theme_color is the page, because that is what the status bar
+        // sits above once the app is actually open. Two different jobs.
+        // Printed by `npm run icons` — keep the two in step if the logo changes.
+        background_color: '#AED854',
+        theme_color: '#F1F1ED',
         icons: [
           { src: 'icon-192.png', sizes: '192x192', type: 'image/png' },
           { src: 'icon-512.png', sizes: '512x512', type: 'image/png' },
-          { src: 'icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
+          // A separate file, not the same one relabelled: a launcher may crop
+          // ~20% off every edge of a maskable icon, which would cut through
+          // "BY BROOMBUILDS". This one has the lockup inset to 70%.
+          { src: 'icon-maskable-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
         ],
       },
       workbox: {
-        // Tesseract's WASM + language data are large; cache them or every cold
-        // start re-downloads ~10MB and the app feels broken.
-        globPatterns: ['**/*.{js,css,html,png,svg,wasm,traineddata,gz}'],
-        maximumFileSizeToCacheInBytes: 15 * 1024 * 1024,
-        navigateFallbackDenylist: [/^\/api\//],
+        // Tesseract's WASM and language data are ~12MB and are self-hosted (see
+        // src/lib/ocr.js). Deliberately NOT precached: precaching them would put
+        // a 12MB download in front of the first launch for a feature the user
+        // may not reach that session. They get a CacheFirst runtime rule below
+        // instead, so the cost is paid once, on the first OCR.
+        globPatterns: ['**/*.{js,css,html,png,svg}'],
+        globIgnores: ['**/tesseract/**'],
+        maximumFileSizeToCacheInBytes: 4 * 1024 * 1024,
+        // The share-target POST must reach our own fetch handler, not the SPA
+        // navigation fallback, which would swallow it and lose the files.
+        navigateFallbackDenylist: [/^\/api\//, /^\/share-target/],
+        importScripts: ['/share-target.js'],
         runtimeCaching: [
           {
-            urlPattern: /^https:\/\/cdn\.jsdelivr\.net\/.*/i,
+            // Our own copies. Nothing is fetched from jsdelivr or unpkg any
+            // more, so the two rules that used to cache those origins are gone
+            // — a CacheFirst rule over a whole third-party CDN is a standing
+            // offer to pin one bad response forever.
+            urlPattern: ({ url }) => url.pathname.startsWith('/tesseract/'),
             handler: 'CacheFirst',
-            options: { cacheName: 'tesseract-assets', expiration: { maxEntries: 20 } },
+            options: {
+              cacheName: 'tesseract-assets',
+              expiration: { maxEntries: 10 },
+              cacheableResponse: { statuses: [0, 200] },
+            },
           },
           {
-            urlPattern: /^https:\/\/unpkg\.com\/.*/i,
+            // Inter comes off Google's CDN. Without this the app falls back to
+            // the system face the moment it's offline, which is the whole point
+            // of a PWA failing.
+            urlPattern: /^https:\/\/fonts\.(googleapis|gstatic)\.com\/.*/i,
             handler: 'CacheFirst',
-            options: { cacheName: 'tesseract-assets', expiration: { maxEntries: 20 } },
+            options: {
+              cacheName: 'google-fonts',
+              expiration: { maxEntries: 30, maxAgeSeconds: 60 * 60 * 24 * 365 },
+              cacheableResponse: { statuses: [0, 200] },
+            },
           },
         ],
       },

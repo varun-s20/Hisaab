@@ -1,6 +1,20 @@
 import { useState } from 'react'
 import { supabase, configured } from '../lib/supabase'
 
+// The app icon itself, not a second copy of the artwork — it is already
+// precached, so the sign-in screen paints instantly and offline. Sits on the
+// cream page rather than inside the green panel below, because the logo brings
+// its own field and two greens meeting at an edge reads as a mistake.
+const Logo = ({ size = 76 }) => (
+  <img
+    src="/icon-192.png"
+    alt="Hisaab, by Broombuilds"
+    width={size}
+    height={size}
+    style={{ display: 'block', borderRadius: size * 0.24, marginBottom: 20 }}
+  />
+)
+
 // Magic link, with a 6-digit code fallback.
 //
 // The fallback is not optional: on Android, tapping a link inside Gmail often
@@ -17,7 +31,7 @@ export default function SignIn() {
   if (!configured) {
     return (
       <div className="screen">
-        <p className="eyebrow">Paisa</p>
+        <Logo size={56} />
         <h1 className="title">Not configured</h1>
         <p className="muted">
           <code>VITE_SUPABASE_URL</code> and <code>VITE_SUPABASE_ANON_KEY</code> are missing.
@@ -57,8 +71,27 @@ export default function SignIn() {
 
   return (
     <div className="screen">
-      <div style={{ marginTop: '18vh' }}>
-        <p className="eyebrow">Paisa</p>
+      <div style={{ marginTop: '9vh' }}>
+        <Logo />
+        <div className="brand" style={{ marginBottom: 28 }}>
+          <div
+            style={{
+              fontFamily: 'var(--display)',
+              fontSize: 'clamp(26px, 8.4vw, 34px)',
+              fontWeight: 700,
+              letterSpacing: '-0.035em',
+              lineHeight: 1.08,
+            }}
+          >
+            Your money,
+            <br />
+            understood.
+          </div>
+          <p className="caption" style={{ margin: '14px 0 0' }}>
+            Drop a screenshot. The ledger writes itself.
+          </p>
+        </div>
+
         <h1 className="title">{sent ? 'Check your email' : 'Sign in'}</h1>
 
         {!sent && (

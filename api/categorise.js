@@ -5,11 +5,27 @@
 // If you ever find yourself adding amount, date, UPI ID or an image here,
 // stop — that breaks the privacy guarantee the whole app is built on.
 
-const CATEGORIES = [
+import { requireUser } from './_auth.js'
+
+const BUILT_IN = [
   'Food & Dining', 'Groceries', 'Transport', 'Shopping', 'Bills & Utilities',
   'Rent', 'Health', 'Entertainment', 'Education', 'Personal Care',
   'Household Help', 'Transfers', 'Income', 'Other',
 ]
+
+/**
+ * The client may send its own list, because categories the user invented live
+ * in their browser and this function has no way to know them. Still bounded and
+ * still snapped to the returned list afterwards — a caller cannot use this to
+ * turn the endpoint into a general-purpose prompt.
+ */
+function allowed(body) {
+  const sent = body?.categories
+  if (!Array.isArray(sent) || sent.length === 0 || sent.length > 40) return BUILT_IN
+  const clean = sent.filter((c) => typeof c === 'string' && c.length > 0 && c.length <= 28)
+  // 'Other' is the fallback every result snaps to, so it has to be in the list.
+  return clean.length > 0 ? [...new Set([...clean, 'Other'])] : BUILT_IN
+}
 
 // An alias, not a pinned version, on purpose: gemini-2.5-flash was retired for
 // new keys mid-build and every call 404'd. Drift is harmless here because the
@@ -18,8 +34,20 @@ const CATEGORIES = [
 // `node scripts/list-models.mjs` shows what this key can actually call.
 const MODEL = process.env.GEMINI_MODEL || 'gemini-flash-lite-latest'
 
+/** A merchant name, and nothing that could read as an instruction. */
+function cleanName(v) {
+  if (typeof v !== 'string') return 'Local merchant'
+  const s = v
+    .replace(/[^\p{L}\p{N} &.'-]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 60)
+  return s || 'Local merchant'
+}
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).end()
+  if (!(await requireUser(req, res))) return
 
   const merchants = req.body?.merchants
   if (!Array.isArray(merchants) || merchants.length === 0 || merchants.length > 50) {
@@ -32,6 +60,8 @@ export default async function handler(req, res) {
     console.error('[categorise] GEMINI_API_KEY is not set')
     return res.status(200).json({ results: [] }) // fail soft, not loud
   }
+
+  const CATEGORIES = allowed(req.body)
 
   const prompt = `You classify Indian merchant name strings from UPI payments into categories.
 
@@ -50,7 +80,10 @@ Input: ${JSON.stringify(merchants)}`
 
   try {
     const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), 12000)
+    // Under Vercel's 10s function cap, so the abort fires and the soft-fail
+    // below actually runs. A platform kill would return a 504 the client can
+    // only read as "broken".
+    const timer = setTimeout(() => controller.abort(), 9000)
     const r = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -75,11 +108,18 @@ Input: ${JSON.stringify(merchants)}`
     const parsed = JSON.parse(text.replace(/```json|```/g, '').trim())
 
     // Never trust the model's category — snap it to the allowed list.
+    //
+    // `clean` can't be snapped the same way, because the whole point of it is a
+    // name the app has never seen. It is still the one field an outsider can
+    // steer: whoever you pay chooses their own UPI display name, that name is
+    // OCR'd into the prompt, and the result is written to merchant_map for
+    // every future payment to them. Strip it to the characters a merchant name
+    // can plausibly contain so an instruction can't survive the round trip.
     const results = (Array.isArray(parsed) ? parsed : [])
       .filter((x) => x && typeof x.merchant === 'string')
       .map((x) => ({
         merchant: x.merchant,
-        clean: typeof x.clean === 'string' ? x.clean.slice(0, 60) : 'Local merchant',
+        clean: cleanName(x.clean),
         category: CATEGORIES.includes(x.category) ? x.category : 'Other',
       }))
 

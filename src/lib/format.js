@@ -42,3 +42,11 @@ export function timeLabel(t) {
 /** Sum only real spending. Transfers, income, lending are money moving, not gone. */
 export const spendTotal = (rows) =>
   rows.reduce((s, r) => (r.type === 'expense' ? s + Number(r.amount) : s), 0)
+
+/** Money that genuinely arrived. A transfer in is your own money, not income,
+ *  so it counts in neither total — which is why these two don't sum to zero. */
+export const earnTotal = (rows) =>
+  rows.reduce(
+    (s, r) => (r.type === 'income' || r.type === 'refund' || r.type === 'repaid' ? s + Number(r.amount) : s),
+    0,
+  )

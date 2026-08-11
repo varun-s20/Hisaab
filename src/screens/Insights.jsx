@@ -1,22 +1,45 @@
-import { useEffect, useMemo, useState } from 'react'
-import { LineChart, Line, XAxis, ResponsiveContainer } from 'recharts'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { LineChart, Line, XAxis, PieChart, Pie, Cell, ResponsiveContainer } from 'recharts'
 import { listTransactions } from '../lib/db'
 import { money, iso, today, startOfMonth, daysInMonth, dayLabel, spendTotal } from '../lib/format'
-import { colorFor, CATEGORIES } from '../lib/categories'
+import { colorFor, allCategories } from '../lib/categories'
+import { findRecurring, committedPerMonth } from '../lib/recurring'
+import CategoryIcon from '../components/CategoryIcon.jsx'
+import Amount from '../components/Amount.jsx'
 
-// recharts needs literal values, not var(). Keep in sync with styles.css.
-const OUT = '#E8A33D'
-const MUTED = '#8A8F94'
-const RULE = '#262A2E'
+// Not a dashboard of squares. Findings first, in sentences, then the numbers
+// that back them. Every sentence here is arithmetic on rows already on the
+// device — nothing on this screen costs an API call.
+
+// recharts needs literal values, not var(). Read once at mount so the chart
+// follows the theme instead of hardcoding one.
+function palette() {
+  const cs = getComputedStyle(document.documentElement)
+  const v = (n) => cs.getPropertyValue(n).trim()
+  return { line: v('--chart-line'), ghost: v('--chart-ghost'), rule: v('--rule'), card: v('--card') }
+}
 
 const dayNum = (d) => Number(String(d).slice(8, 10))
-const catOf = (r) => (CATEGORIES.includes(r.category) ? r.category : 'Other')
+// Read once, not per row — a category the user invented is a real category here
+// and localStorage inside a reduce is a synchronous disk hit per transaction.
+let KNOWN = new Set(allCategories())
+const catOf = (r) => (KNOWN.has(r.category) ? r.category : 'Other')
 
 const median = (xs) => {
   const s = [...xs].sort((a, b) => a - b)
   const m = s.length >> 1
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2
 }
+
+// findRecurring has no notion of recency: a service cancelled in April still
+// has its three sightings inside the six-month window and still reads as
+// "monthly" in August. Anything whose next payment came and went more than a
+// full cycle ago has lapsed — it is not committed money, and showing its stale
+// due date as "next around" states a past date as the future.
+const CYCLE_DAYS = { weekly: 7, fortnightly: 14, monthly: 30.4, quarterly: 91, yearly: 365 }
+// Both sides parse as UTC midnight, so the difference is exact whole days.
+const daysSince = (date) => (Date.parse(today()) - Date.parse(date)) / 86400000
+const hasLapsed = (f) => daysSince(f.next) > (CYCLE_DAYS[f.cadence] ?? 30.4)
 
 const Rs = ({ n, className = '' }) => (
   <span className={`num ${className}`.trim()}>
@@ -26,26 +49,132 @@ const Rs = ({ n, className = '' }) => (
 )
 
 const Skeleton = ({ h }) => (
-  <div style={{ height: h, background: 'var(--surface)', borderRadius: 'var(--radius)', marginBottom: 12 }} />
+  <div style={{ height: h, background: 'var(--neutral)', borderRadius: 'var(--radius)', marginBottom: 12 }} />
 )
 
-export default function Insights() {
+/** Hold the old value until the blur has covered it, then swap. A straight
+ *  crossfade shows two texts overlapping; blur bridges them into one change.
+ *
+ *  Keyed off `value` alone. Depending on `shown` — which this effect also sets —
+ *  meant the loop was held open only by an equality guard, one added branch away
+ *  from re-running itself forever. A ref skips the mount pass instead, which is
+ *  the only thing that guard was really for. */
+function useBlurSwap(value, ms = 160) {
+  const [shown, setShown] = useState(value)
+  const [swapping, setSwapping] = useState(false)
+  const mounted = useRef(false)
+  useEffect(() => {
+    if (!mounted.current) {
+      mounted.current = true // first paint is not a change, so nothing to blur over
+      return
+    }
+    setSwapping(true)
+    const t = setTimeout(() => {
+      setShown(value)
+      setSwapping(false)
+    }, ms)
+    return () => clearTimeout(t)
+  }, [value, ms])
+  return [shown, swapping]
+}
+
+/** Findings, in priority order. Only ones the data actually supports get made —
+ *  a "noticed" block that fires on noise teaches the user to ignore the box. */
+function findings({ cats, merchants, projected, prevTotal, dom, dim }) {
+  const out = []
+
+  const hot = cats
+    .filter((c) => c.prevMTD > 0 && c.amt > c.prevMTD * 1.25 && c.amt >= 500)
+    .sort((a, b) => b.amt - b.prevMTD - (a.amt - a.prevMTD))[0]
+  if (hot) {
+    const pct = Math.round(((hot.amt - hot.prevMTD) / hot.prevMTD) * 100)
+    out.push({
+      k: 'Trending up',
+      text: (
+        <>
+          <b>{hot.name}</b> is {pct}% higher than the same stretch of last month —{' '}
+          <Rs n={hot.amt} /> against <Rs n={hot.prevMTD} />.
+        </>
+      ),
+    })
+  }
+
+  const habit = merchants.filter((m) => m.count >= 4)[0]
+  if (habit) {
+    const each = habit.total / habit.count
+    const monthly = each * (habit.count / Math.max(dom, 1)) * dim
+    out.push({
+      k: 'A habit',
+      text: (
+        <>
+          <b>{habit.name}</b> {habit.count} times this month, <Rs n={each} /> a go. At this rate
+          it&rsquo;s <Rs n={monthly} /> by month end.
+        </>
+      ),
+    })
+  }
+
+  if (prevTotal > 0) {
+    const delta = projected - prevTotal
+    const pct = Math.round((Math.abs(delta) / prevTotal) * 100)
+    if (pct >= 10) {
+      out.push({
+        k: 'Pace',
+        text: (
+          <>
+            You&rsquo;re on track to finish <Rs n={Math.abs(delta)} /> ({pct}%){' '}
+            {delta > 0 ? 'over' : 'under'} last month.
+          </>
+        ),
+      })
+    }
+  }
+
+  return out.slice(0, 3)
+}
+
+/** The way into Ask. Sits above the month, because a question you already have
+ *  beats a chart you have to interpret. */
+const AskBar = ({ onClick }) => (
+  <button className="askentry" onClick={onClick}>
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+      <circle cx="11" cy="11" r="7" />
+      <path d="m20 20-3.6-3.6" />
+    </svg>
+    <span>Ask about your money…</span>
+  </button>
+)
+
+export default function Insights({ goAsk }) {
   const [rows, setRows] = useState(null)
+  const [err, setErr] = useState('')
+  const [attempt, setAttempt] = useState(0)
+  const [c] = useState(palette)
+  const [active, setActive] = useState(null) // index into the donut slices
 
   useEffect(() => {
     let live = true
+    // Refreshed per mount — the screen is unmounted when you leave the tab, so
+    // a category invented in the picker is known by the time you come back.
+    KNOWN = new Set(allCategories())
     const now = new Date()
-    const from = startOfMonth(new Date(now.getFullYear(), now.getMonth() - 1, 1))
-    listTransactions({ from, to: today() })
-      .then((d) => live && setRows(d))
+    // Six months, not two: a monthly subscription needs three sightings before
+    // it can be told apart from a coincidence. The month-over-month figures
+    // below filter down to their own windows regardless.
+    const from = startOfMonth(new Date(now.getFullYear(), now.getMonth() - 5, 1))
+    setErr('')
+    listTransactions({ from, to: today(), limit: 3000 })
+      .then((data) => live && setRows(data))
       .catch((e) => {
         console.error(e)
-        if (live) setRows([])
+        // Never [] here. An empty array is a claim — "you spent nothing this
+        // month" — and a dropped connection is not entitled to make it.
+        if (live) setErr(e.message ?? String(e))
       })
     return () => {
       live = false
     }
-  }, [])
+  }, [attempt])
 
   const d = useMemo(() => {
     const now = new Date()
@@ -57,9 +186,15 @@ export default function Insights() {
     const dom = now.getDate()
 
     // Every number below is spend-only. Transfers, income, lent, repaid never count.
+    // monthCount is the exception: it counts rows of any type, because a month
+    // of nothing but salary has plenty logged and no spending.
+    const monthCount = (rows ?? []).filter((r) => r.txn_date >= monthStart).length
     const spend = (rows ?? []).filter((r) => r.type === 'expense')
     const cur = spend.filter((r) => r.txn_date >= monthStart)
     const prev = spend.filter((r) => r.txn_date >= prevStart && r.txn_date < monthStart)
+    // Last month cut at the same day of the month — the only fair comparison
+    // for a percentage.
+    const prevSoFar = prev.filter((r) => dayNum(r.txn_date) <= dom)
 
     const perDay = (list, n) => {
       const a = new Array(n + 2).fill(0)
@@ -85,18 +220,21 @@ export default function Insights() {
     const totals = (list) => {
       const m = new Map()
       for (const r of list) {
-        const c = catOf(r)
-        m.set(c, (m.get(c) ?? 0) + Number(r.amount))
+        const cat = catOf(r)
+        m.set(cat, (m.get(cat) ?? 0) + Number(r.amount))
       }
       return m
     }
     const curCats = totals(cur)
-    const prevCats = totals(prev)
-    const cats = [...curCats.entries()]
+    const prevMTDCats = totals(prevSoFar)
+    const ranked = [...curCats.entries()]
       .sort((x, y) => y[1] - x[1])
-      .slice(0, 8)
-      .map(([name, amt]) => ({ name, amt, ghost: prevCats.get(name) ?? 0 }))
-    const catMax = Math.max(1, ...cats.map((c) => Math.max(c.amt, c.ghost)))
+      .map(([name, amt]) => ({ name, amt, prevMTD: prevMTDCats.get(name) ?? 0 }))
+
+    // Six slices plus a swept-up remainder. Past that a donut is confetti.
+    const cats = ranked.slice(0, 6)
+    const rest = ranked.slice(6).reduce((s, x) => s + x.amt, 0)
+    const slices = rest > 0 ? [...cats, { name: 'Everything else', amt: rest, prevMTD: 0 }] : cats
 
     const byMerchant = new Map()
     for (const r of cur) {
@@ -124,205 +262,398 @@ export default function Insights() {
         weekend: wd === 0 || wd === 6,
       })
     }
+    const busiest = strip.reduce((best, x) => (x.amt > (best?.amt ?? 0) ? x : best), null)
 
     const cutoffs = new Map()
-    for (const [c] of curCats) {
-      cutoffs.set(c, 2 * median(cur.filter((r) => catOf(r) === c).map((r) => Number(r.amount))))
+    for (const [cat] of curCats) {
+      cutoffs.set(cat, 2 * median(cur.filter((r) => catOf(r) === cat).map((r) => Number(r.amount))))
     }
     const unusual = cur
       .filter((r) => Number(r.amount) > cutoffs.get(catOf(r)))
       .sort((x, y) => Number(y.amount) - Number(x.amount))
       .slice(0, 5)
 
-    return { dim, dom, line, mtd, prevTotal, projected, cats, catMax, merchants, strip, unusual }
+    // Over the whole six months, not just this one — three sightings is the floor.
+    // Split, though: a bill that stopped charging is history, not commitment.
+    const found = findRecurring(spend)
+    const recurring = found.filter((f) => !hasLapsed(f))
+    const lapsed = found.filter(hasLapsed)
+
+    return {
+      dim, dom, line, mtd, prevTotal, projected, monthCount,
+      cats: ranked.slice(0, 8), slices, merchants, strip, busiest, unusual, recurring, lapsed,
+    }
   }, [rows])
+
+  const [shownActive, swapping] = useBlurSwap(active)
+
+  // Before the skeleton: a failure has to say so. Falling through to "nothing
+  // logged" would have the app confidently report a ₹0 month off a dropped
+  // connection, which is the one thing an expense tracker must never do.
+  if (err) {
+    return (
+      <div className="screen">
+        <p className="eyebrow">Insights</p>
+        <h1 className="title">Couldn&rsquo;t read your month</h1>
+        <div className="card">
+          <p className="empty" style={{ paddingBottom: 10 }}>
+            Your transactions didn&rsquo;t load, so there are no numbers to show — this is not
+            an empty month.
+          </p>
+          <p className="alert" style={{ fontSize: 13, textAlign: 'center', margin: '0 0 16px' }}>{err}</p>
+          <p style={{ textAlign: 'center', margin: '0 0 24px' }}>
+            <button className="btn ghost small" onClick={() => setAttempt((n) => n + 1)}>
+              Try again
+            </button>
+          </p>
+        </div>
+      </div>
+    )
+  }
 
   if (!rows) {
     return (
       <div className="screen">
         <p className="eyebrow">Insights</p>
-        <Skeleton h={170} />
-        <Skeleton h={120} />
         <Skeleton h={190} />
+        <Skeleton h={120} />
+        <Skeleton h={280} />
       </div>
     )
   }
 
+  // Rows, not rupees. A month of nothing but salary has plenty logged, and
+  // telling its owner "nothing logged yet" is simply wrong.
+  if (d.monthCount === 0) {
+    return (
+      <div className="screen">
+        <p className="eyebrow">Insights</p>
+        <h1 className="title">Where did your money actually go?</h1>
+        <div className="card">
+          <p className="empty">Nothing logged yet this month. Ask again in a few days.</p>
+        </div>
+      </div>
+    )
+  }
+
+  // Logged, but none of it spending. Every chart below divides by the month's
+  // spend, so there is nothing to draw — but the reason is the opposite of empty.
   if (d.mtd === 0) {
     return (
       <div className="screen">
         <p className="eyebrow">Insights</p>
-        <p className="empty">Nothing logged yet this month.</p>
+        <h1 className="title">Nothing spent yet this month</h1>
+        <div className="card">
+          <p className="empty">
+            {d.monthCount} thing{d.monthCount === 1 ? '' : 's'} logged so far, none of it
+            spending. The charts start once money goes out.
+          </p>
+        </div>
       </div>
     )
   }
 
-  const delta = d.projected - d.prevTotal
+  const notes = findings(d)
   const ticks = [...new Set([1, Math.round(d.dom / 2), d.dom])].filter((t) => t >= 1)
+  const picked = shownActive == null ? null : d.slices[shownActive]
 
   return (
     <div className="screen">
-      <p className="eyebrow">Insights</p>
+      <div className="stagger">
+        <p className="eyebrow">
+          This month, day {d.dom} of {d.dim}
+        </p>
+        <h1 className="title">Where your money actually went</h1>
 
-      <h2 className="section" style={{ marginTop: 0 }}>
-        Month to date
-      </h2>
-      <ResponsiveContainer width="100%" height={170}>
-        <LineChart data={d.line} margin={{ top: 6, right: 6, bottom: 0, left: 6 }}>
-          <XAxis
-            dataKey="day"
-            ticks={ticks}
-            tick={{ fill: MUTED, fontSize: 11 }}
-            tickLine={false}
-            axisLine={{ stroke: RULE }}
-          />
-          <Line
-            type="monotone"
-            dataKey="prev"
-            stroke={MUTED}
-            strokeWidth={1.5}
-            strokeDasharray="3 3"
-            dot={false}
-            isAnimationActive={false}
-          />
-          <Line
-            type="monotone"
-            dataKey="now"
-            stroke={OUT}
-            strokeWidth={2}
-            dot={false}
-            isAnimationActive={false}
-          />
-        </LineChart>
-      </ResponsiveContainer>
-      <div style={{ display: 'flex', gap: 16, fontSize: 11, color: MUTED, marginTop: 2 }}>
-        <span>
-          <b style={{ color: OUT }}>—</b> this month <Rs n={d.mtd} />
-        </span>
-        <span>
-          <b>--</b> same day last month <Rs n={d.line.at(-1)?.prev ?? 0} />
-        </span>
-      </div>
+        <AskBar onClick={goAsk} />
 
-      <div className="hero">
-        <div className="amount num out">
-          <span className="rupee">₹</span>
-          {money(d.projected)}
-        </div>
-        <div className="label">
-          Projected month-end
-          {d.prevTotal > 0 && (
-            <>
-              {' · '}
-              <Rs n={Math.abs(delta)} /> {delta >= 0 ? 'over' : 'under'} last month
-            </>
-          )}
-        </div>
-      </div>
-
-      <h2 className="section">Categories</h2>
-      {d.cats.map((c) => {
-        const colour = colorFor(c.name)
-        return (
-          <div key={c.name} style={{ marginBottom: 11 }}>
-            <div
-              style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'baseline',
-                gap: 10,
-                marginBottom: 5,
-                fontSize: 14,
-              }}
-            >
-              <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {c.name}
-              </span>
-              <Rs n={c.amt} />
+        <div className="brand">
+          <p className="caption">Spent so far</p>
+          <Amount value={d.mtd} className="amount" />
+          <hr />
+          <div className="foot">
+            <div>
+              <span className="k">At this rate</span>
+              <b className="num">₹{money(d.projected)}</b>
             </div>
-            <div style={{ position: 'relative', height: 8, borderRadius: 2, background: 'var(--rule)' }}>
-              <div
-                style={{
-                  position: 'absolute',
-                  top: 0,
-                  bottom: 0,
-                  left: 0,
-                  width: `${(c.ghost / d.catMax) * 100}%`,
-                  background: colour,
-                  opacity: 0.26,
-                  borderRadius: 2,
-                }}
-              />
-              <div
-                style={{
-                  position: 'absolute',
-                  top: 0,
-                  bottom: 0,
-                  left: 0,
-                  width: `${(c.amt / d.catMax) * 100}%`,
-                  background: colour,
-                  borderRadius: 2,
-                }}
-              />
+            {/* No last month, no comparison. A ₹0 sitting under a label reads
+                as a real figure rather than an absence. */}
+            {d.prevTotal > 0 && (
+              <div>
+                <span className="k">Last month</span>
+                <b className="num">₹{money(d.prevTotal)}</b>
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="tiles">
+          <div className="card">
+            <div className="k">Daily average</div>
+            <div className="v num">₹{money(d.mtd / d.dom)}</div>
+          </div>
+          <div className="card">
+            <div className="k">Busiest day</div>
+            <div className="v num">₹{money(d.busiest?.amt ?? 0)}</div>
+          </div>
+        </div>
+
+        {notes.length > 0 && (
+          <div>
+            {notes.map((n) => (
+              <div className="noticed" key={n.k}>
+                <div className="body">
+                  <span className="k">{n.k}</span>
+                  <p>{n.text}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <h2 className="section">The split</h2>
+      <div className="card">
+        <div className="card-body" style={{ paddingBottom: 6 }}>
+          <div className="donut">
+            <ResponsiveContainer width="100%" height={224}>
+              <PieChart>
+                <Pie
+                  data={d.slices}
+                  dataKey="amt"
+                  nameKey="name"
+                  innerRadius="66%"
+                  outerRadius="100%"
+                  paddingAngle={2.5}
+                  cornerRadius={7}
+                  stroke="none"
+                  startAngle={90}
+                  endAngle={-270}
+                  // No sweep-in. Webfonts landing after mount resize the
+                  // container, recharts restarts the entrance from radius 0,
+                  // and the ring can sit there empty. A chart has to be
+                  // readable immediately; the motion that earns its keep here
+                  // is the selection fade below, not a reveal.
+                  isAnimationActive={false}
+                  onClick={(_, i) => setActive((a) => (a === i ? null : i))}
+                >
+                  {d.slices.map((s, i) => (
+                    <Cell
+                      key={s.name}
+                      fill={s.name === 'Everything else' ? 'var(--rule-strong)' : colorFor(s.name)}
+                      // Dimming the rest is the selection. No exploding slices —
+                      // a segment that jumps out moves the whole ring's balance.
+                      opacity={active == null || active === i ? 1 : 0.28}
+                      style={{ transition: 'opacity 200ms cubic-bezier(0.23,1,0.32,1)', cursor: 'pointer' }}
+                    />
+                  ))}
+                </Pie>
+              </PieChart>
+            </ResponsiveContainer>
+
+            <div className="centre">
+              <div className="swap" data-swapping={swapping}>
+                <div className="k">{picked ? picked.name : 'All categories'}</div>
+                <div className="v num">₹{money(picked ? picked.amt : d.mtd)}</div>
+                {picked && (
+                  <div className="k" style={{ marginTop: 4 }}>
+                    {Math.round((picked.amt / d.mtd) * 100)}% of the month
+                  </div>
+                )}
+              </div>
             </div>
           </div>
-        )
-      })}
+
+          <div className="legend" style={{ marginTop: 8 }}>
+            {d.slices.map((s, i) => (
+              <button
+                key={s.name}
+                data-active={active === i}
+                onClick={() => setActive((a) => (a === i ? null : i))}
+              >
+                <CategoryIcon category={s.name === 'Everything else' ? 'Other' : s.name} />
+                <span className="nm">{s.name}</span>
+                <span className="pc">{Math.round((s.amt / d.mtd) * 100)}%</span>
+                <span className="vl num">₹{money(s.amt)}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <h2 className="section">Against last month</h2>
+      <div className="card">
+        <div className="card-body">
+          <ResponsiveContainer width="100%" height={168}>
+            <LineChart data={d.line} margin={{ top: 6, right: 4, bottom: 0, left: 4 }}>
+              <XAxis
+                dataKey="day"
+                ticks={ticks}
+                tick={{ fill: c.ghost, fontSize: 11 }}
+                tickLine={false}
+                axisLine={{ stroke: c.rule }}
+              />
+              <Line
+                type="monotone"
+                dataKey="prev"
+                stroke={c.ghost}
+                strokeWidth={1.5}
+                strokeDasharray="3 4"
+                dot={false}
+                isAnimationActive={false}
+              />
+              <Line
+                type="monotone"
+                dataKey="now"
+                stroke={c.line}
+                strokeWidth={2.5}
+                dot={false}
+                isAnimationActive={false}
+              />
+            </LineChart>
+          </ResponsiveContainer>
+          <div style={{ display: 'flex', gap: 16, fontSize: 12, color: 'var(--muted)', marginTop: 6 }}>
+            <span>
+              <b style={{ color: c.line }}>—</b> this month <Rs n={d.mtd} />
+            </span>
+            <span>
+              <b>--</b> same day last month <Rs n={d.line.at(-1)?.prev ?? 0} />
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <h2 className="section">Every day this month</h2>
+      <div className="card">
+        <div className="card-body">
+          <div className="strip">
+            {d.strip.map((b) => (
+              <div
+                key={b.day}
+                title={`${b.day}: ₹${money(b.amt)}`}
+                className={`bar${b.amt > 0 ? ' has' : ''}${b.isToday ? ' today' : ''}${b.weekend ? ' weekend' : ''}`}
+                style={{ height: `${Math.max(b.pct, 3)}%` }}
+              />
+            ))}
+          </div>
+          <div className="striplabels">
+            <span>1</span>
+            <span>{d.dim}</span>
+          </div>
+        </div>
+      </div>
+
+      {d.recurring.length > 0 && (
+        <>
+          <h2 className="section">Recurring</h2>
+          <div className="card">
+            <div className="card-head">
+              <span>Committed every month</span>
+              <span className="num">₹{money(committedPerMonth(d.recurring))}</span>
+            </div>
+            <ul className="ledger">
+              {d.recurring.slice(0, 8).map((f) => (
+                <li key={f.name}>
+                  <div className="row">
+                    <CategoryIcon category={f.category} />
+                    <div className="who">
+                      <div className="name">{f.name}</div>
+                      <div className="meta">
+                        {f.cadence} · next around {dayLabel(f.next)}
+                      </div>
+                    </div>
+                    <div className="amt">
+                      <Rs n={f.amount} />
+                    </div>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </>
+      )}
+
+      {d.lapsed.length > 0 && (
+        <>
+          <h2 className="section">Looks cancelled</h2>
+          <div className="card">
+            <div className="card-head">
+              <span>Was costing you</span>
+              <span className="num">₹{money(committedPerMonth(d.lapsed))}</span>
+            </div>
+            <ul className="ledger">
+              {d.lapsed.slice(0, 8).map((f) => (
+                <li key={f.name}>
+                  <div className="row">
+                    <CategoryIcon category={f.category} />
+                    <div className="who">
+                      <div className="name">{f.name}</div>
+                      <div className="meta">
+                        {f.cadence} · nothing since {dayLabel(f.last)}
+                      </div>
+                    </div>
+                    <div className="amt">
+                      <Rs n={f.amount} />
+                    </div>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </div>
+          <p className="muted" style={{ fontSize: 12, margin: '8px 2px 0', lineHeight: 1.6 }}>
+            These charged on a schedule and then stopped. Nothing here counts as money
+            you are still committed to.
+          </p>
+        </>
+      )}
 
       {d.merchants.length > 0 && (
         <>
           <h2 className="section">Repeats</h2>
-          <ul className="ledger">
-            {d.merchants.map((m) => (
-              <li className="row" key={m.name}>
-                <i className="dot" style={{ background: colorFor(m.category) }} />
-                <div className="who">
-                  <div className="name">{m.name}</div>
-                  <div className="meta">{m.count} times</div>
-                </div>
-                <div className="amt">
-                  <Rs n={m.total} />
-                </div>
-              </li>
-            ))}
-          </ul>
+          <div className="card">
+            <ul className="ledger">
+              {d.merchants.map((m) => (
+                <li key={m.name}>
+                  <div className="row">
+                    <CategoryIcon category={m.category} />
+                    <div className="who">
+                      <div className="name">{m.name}</div>
+                      <div className="meta">{m.count} times</div>
+                    </div>
+                    <div className="amt">
+                      <Rs n={m.total} />
+                    </div>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </div>
         </>
       )}
 
-      <h2 className="section">Daily</h2>
-      <div className="strip">
-        {d.strip.map((b) => (
-          <div
-            key={b.day}
-            className={`bar${b.amt > 0 ? ' has' : ''}${b.isToday ? ' today' : ''}${b.weekend ? ' weekend' : ''}`}
-            style={{ height: `${b.pct}%` }}
-          />
-        ))}
-      </div>
-      <div className="striplabels">
-        <span>1</span>
-        <span>{d.dim}</span>
-      </div>
-
       {d.unusual.length > 0 && (
         <>
-          <h2 className="section">Unusual</h2>
-          <ul className="ledger">
-            {d.unusual.map((r) => (
-              <li className="row flagged" key={r.id}>
-                <i className="dot" style={{ background: colorFor(catOf(r)) }} />
-                <div className="who">
-                  <div className="name">{r.payee_clean || r.payee_raw}</div>
-                  <div className="meta">
-                    {catOf(r)} · {dayLabel(r.txn_date)}
+          <h2 className="section">Bigger than usual</h2>
+          <div className="card">
+            <ul className="ledger">
+              {d.unusual.map((r) => (
+                <li key={r.id}>
+                  <div className="row flagged">
+                    <CategoryIcon category={catOf(r)} />
+                    <div className="who">
+                      <div className="name">{r.payee_clean || r.payee_raw}</div>
+                      <div className="meta">
+                        {catOf(r)} · {dayLabel(r.txn_date)}
+                      </div>
+                    </div>
+                    <div className="amt">
+                      <Rs n={r.amount} />
+                    </div>
                   </div>
-                </div>
-                <div className="amt">
-                  <Rs n={r.amount} />
-                </div>
-              </li>
-            ))}
-          </ul>
+                </li>
+              ))}
+            </ul>
+          </div>
         </>
       )}
     </div>

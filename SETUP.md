@@ -1,4 +1,4 @@
-# Paisa — setup
+# Hisaab — setup
 
 Everything you need to click through once. ~15 minutes.
 
@@ -49,8 +49,8 @@ a green "RLS enabled" badge.
 
 | Field | Value |
 |---|---|
-| Site URL | `https://paisa.yourdomain.com` (your production URL) |
-| Redirect URLs | `http://localhost:5173/**` <br> `https://paisa.yourdomain.com/**` <br> `https://*-yourname.vercel.app/**` |
+| Site URL | `https://hisaab.yourdomain.com` (your production URL) |
+| Redirect URLs | `http://localhost:5173/**` <br> `https://hisaab.yourdomain.com/**` <br> `https://*-yourname.vercel.app/**` |
 
 Without the localhost entry, links from local dev bounce to production and the
 login fails silently. The `/**` wildcard matters — an exact URL without it
@@ -63,7 +63,7 @@ rejects any link carrying query params, which every magic link does.
 Subject:
 
 ```
-Your Paisa sign-in link
+Your Hisaab sign-in link
 ```
 
 Message body (switch the editor to **Source / HTML** and replace everything):
@@ -75,14 +75,14 @@ Message body (switch the editor to **Source / HTML** and replace everything):
       <table width="100%" style="max-width:420px;background:#181B1E;border-radius:14px;padding:32px">
         <tr>
           <td>
-            <p style="margin:0 0 4px;color:#E8A33D;font-size:13px;letter-spacing:.12em;text-transform:uppercase">Paisa</p>
+            <p style="margin:0 0 4px;color:#E8A33D;font-size:13px;letter-spacing:.12em;text-transform:uppercase">Hisaab</p>
             <h1 style="margin:0 0 16px;color:#E8E6E1;font-size:22px;font-weight:600">Sign in</h1>
             <p style="margin:0 0 28px;color:#8A8F94;font-size:15px;line-height:1.5">
               Tap the button to open your ledger. The link works once and expires in an hour.
             </p>
             <a href="{{ .ConfirmationURL }}"
                style="display:inline-block;background:#E8A33D;color:#0E1012;text-decoration:none;font-size:15px;font-weight:600;padding:13px 26px;border-radius:10px">
-              Open Paisa
+              Open Hisaab
             </a>
             <p style="margin:28px 0 0;color:#8A8F94;font-size:13px;line-height:1.5">
               Or paste this code into the app: <strong style="color:#E8E6E1;font-size:17px;letter-spacing:.15em">{{ .Token }}</strong>
@@ -175,14 +175,14 @@ those merchants by hand.
 
 ```bash
 git init && git add . && git commit -m "init"
-gh repo create paisa --private --source=. --push
+gh repo create hisaab --private --source=. --push
 ```
 
 Then Vercel → Add New → Project → import the repo. Framework preset: **Vite**.
 Build command `npm run build`, output `dist`. Add the env vars from §4 before
 the first deploy.
 
-**Domain:** Vercel → Settings → Domains → add `paisa.yourdomain.com`, then set the
+**Domain:** Vercel → Settings → Domains → add `hisaab.yourdomain.com`, then set the
 CNAME at your registrar as instructed. Come back and update Supabase's Site URL
 (§3b) to match.
 
@@ -191,6 +191,11 @@ CNAME at your registrar as instructed. Come back and update Supabase's Site URL
 ### Verify after install
 
 - Airplane mode → app still opens
-- First OCR after a fresh install doesn't stall on a 10MB download
+- The first OCR downloads ~12MB from **your own domain** — check the Network tab
+  shows `/tesseract/…` and nothing from `cdn.jsdelivr.net`. It is deliberately not
+  precached: paying that cost at install, before you know the user will ever OCR
+  anything, is worse. Every OCR after the first is offline.
 - Uploading the same screenshot twice creates one row, not two
 - Supabase → Storage has **no bucket at all** (images are never uploaded)
+- `curl -X POST https://your-app/api/ask -d '{"question":"hi"}' -H 'content-type: application/json'`
+  answers **401**. Both functions spend your Gemini key, so both require a signed-in caller.

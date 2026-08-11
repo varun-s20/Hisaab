@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react'
 import { listNeedsReview, updateTransaction, deleteTransaction } from '../lib/db'
 import { learn } from '../lib/categorise'
-import { CATEGORIES, TYPES } from '../lib/categories'
+import { TYPES } from '../lib/categories'
 import { money } from '../lib/format'
+import CategoryPicker from '../components/CategoryPicker.jsx'
+import ScreenHeader from '../components/ScreenHeader.jsx'
 
 // What the parser handed us, shaped for inputs. Blank means it couldn't read it —
 // never a blank form, only the blanks that are genuinely blank.
@@ -16,33 +18,38 @@ const draftOf = (t) => ({
   direction: t.direction ?? 'debit',
 })
 
-export default function Review({ onChange }) {
+export default function Review({ onChange, onBack }) {
   const [rows, setRows] = useState(null)
   const [drafts, setDrafts] = useState({})
   const [busy, setBusy] = useState(null)
   const [err, setErr] = useState('')
+  // A load that failed is not a screen with nothing on it. This error is kept
+  // apart from the toast below because it must not clear itself — rows stays
+  // null on failure, so a vanishing message leaves a blank screen and no way back.
+  const [loadErr, setLoadErr] = useState('')
+  const [confirming, setConfirming] = useState(null)
 
   const fail = (e) => setErr(e?.message || 'That didn’t go through.')
 
-  useEffect(() => {
-    let live = true
-    listNeedsReview()
-      .then((data) => {
-        if (!live) return
-        // Worst confidence first — the ones the parser was least sure about.
-        const sorted = [...data].sort((a, b) => (a.confidence ?? 0) - (b.confidence ?? 0))
-        setRows(sorted)
-        setDrafts(Object.fromEntries(sorted.map((t) => [t.id, draftOf(t)])))
-      })
-      .catch((e) => {
-        if (live) fail(e)
-      })
-    return () => {
-      live = false
+  async function load() {
+    setLoadErr('')
+    try {
+      const data = await listNeedsReview()
+      // Worst confidence first — the ones the parser was least sure about.
+      const sorted = [...data].sort((a, b) => (a.confidence ?? 0) - (b.confidence ?? 0))
+      setRows(sorted)
+      setDrafts(Object.fromEntries(sorted.map((t) => [t.id, draftOf(t)])))
+    } catch (e) {
+      setLoadErr(e?.message || 'Couldn’t reach the ledger.')
     }
+  }
+
+  useEffect(() => {
+    load()
   }, [])
 
-  // One shot, no retry loop. The toast clears itself rather than sitting over the nav.
+  // One shot, no retry loop. The toast clears itself rather than sitting over the
+  // nav. The load error above is deliberately not one of these.
   useEffect(() => {
     if (!err) return
     const id = setTimeout(() => setErr(''), 4000)
@@ -75,6 +82,11 @@ export default function Review({ onChange }) {
         direction: d.direction,
         needs_review: false,
         confidence: 1.0,
+        // The OCR dump is only kept while a row is in this queue — it is what
+        // the "What the app read" panel shows. Once the row is confirmed there
+        // is nothing left to check it against, and keeping it would leave UPI
+        // references and account names in the database for good. See db.js.
+        raw_text: null,
       })
       drop(t.id)
 
@@ -90,13 +102,21 @@ export default function Review({ onChange }) {
     }
   }
 
-  // ponytail: optimistic, no confirm dialog. Single-user app, one row, undo is re-uploading.
+  // Two steps, inline, the same as EditSheet. A window.confirm() would freeze the
+  // page, and there is nothing behind this row to restore it from — a manual
+  // entry or a statement import has no screenshot to re-upload.
+  // Not optimistic either: dropping the row before the delete lands leaves the
+  // list and the App badge disagreeing until a remount.
   async function discard(id) {
-    drop(id)
+    setBusy(id)
     try {
       await deleteTransaction(id)
+      drop(id)
     } catch (e) {
       fail(e)
+    } finally {
+      setBusy(null)
+      setConfirming(null)
     }
   }
 
@@ -104,12 +124,25 @@ export default function Review({ onChange }) {
 
   return (
     <div className="screen">
-      {rows && n === 0 && <p className="empty">Nothing needs a look.</p>}
+      <ScreenHeader title={n > 0 ? `${n} need${n === 1 ? 's' : ''} a look` : 'Needs a look'} onBack={onBack} />
 
-      {n > 0 && (
-        <h1 className="title">
-          {n} need{n === 1 ? 's' : ''} a look
-        </h1>
+      {loadErr && (
+        <div className="card">
+          <div className="card-body">
+            <p className="alert" style={{ margin: '0 0 12px' }}>
+              Couldn&rsquo;t load this. {loadErr}
+            </p>
+            <button className="btn ghost small" onClick={load}>
+              Try again
+            </button>
+          </div>
+        </div>
+      )}
+
+      {rows && n === 0 && (
+        <div className="card">
+          <p className="empty">Nothing needs a look.</p>
+        </div>
       )}
 
       {rows?.map((t) => {
@@ -172,17 +205,7 @@ export default function Review({ onChange }) {
               />
             </label>
 
-            <label className="field">
-              <span>Category</span>
-              <select value={d.category} onChange={(e) => set(t.id, 'category', e.target.value)}>
-                <option value="">Pick one</option>
-                {CATEGORIES.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
-                ))}
-              </select>
-            </label>
+            <CategoryPicker value={d.category} onChange={(c) => set(t.id, 'category', c)} />
 
             <label className="field">
               <span>Type</span>
@@ -219,14 +242,32 @@ export default function Review({ onChange }) {
               </pre>
             </details>
 
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
-              <button className="btn small" onClick={() => save(t)} disabled={busy === t.id}>
-                {busy === t.id ? 'Saving' : 'Save'}
-              </button>
-              <button className="linkish" onClick={() => discard(t.id)}>
-                Discard
-              </button>
-            </div>
+            {confirming === t.id ? (
+              <div className="danger">
+                <p className="muted">Discard this transaction? It can&rsquo;t be undone.</p>
+                <div className="danger-actions">
+                  <button className="btn ghost small" onClick={() => setConfirming(null)}>
+                    Keep it
+                  </button>
+                  <button
+                    className="btn small destructive"
+                    disabled={busy === t.id}
+                    onClick={() => discard(t.id)}
+                  >
+                    {busy === t.id ? 'Discarding' : 'Discard'}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                <button className="btn small" onClick={() => save(t)} disabled={busy === t.id}>
+                  {busy === t.id ? 'Saving' : 'Save'}
+                </button>
+                <button className="linkish danger-link" onClick={() => setConfirming(t.id)}>
+                  Discard
+                </button>
+              </div>
+            )}
           </div>
         )
       })}

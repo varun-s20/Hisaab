@@ -39,6 +39,10 @@ export function extractAmount(lines) {
   // Payment screens put the amount big and near the top. Prefer the earliest
   // currency-marked number; fall back to a grouped/decimal number.
   for (const line of lines) {
+    // Same guard as the loose pass below. A bank-style screen puts "Avl Bal
+    // ₹12,345" above the payment, and a currency mark on the balance is not a
+    // reason to trust it more than the amount actually paid.
+    if (/balance|limit|cashback|reward/i.test(line)) continue
     const m = line.match(AMOUNT_STRICT)
     if (m) {
       const n = toNumber(m[1])
@@ -59,13 +63,23 @@ export function extractAmount(lines) {
 // ── Reference / UTR ──────────────────────────────────────────────────────────
 const REF_LABELLED =
   /(?:UPI transaction ID|UPI Ref(?:erence)?(?:\s?(?:ID|No\.?))?|Transaction ID|Txn\.?\s?ID|UTR(?:\s?No\.?)?|Order ID)\s*[:\-]?\s*([A-Za-z0-9]{8,25})/i
-const REF_BARE = /\b(\d{12,22})\b/ // bare 12-digit UTR, common on bank SMS-style screens
+// Bare UTR, common on bank SMS-style screens. Exactly 12 digits, and not on a
+// line that names an account or a card: the old 12-22 range matched account
+// numbers too, and an account number is the same on every screenshot — two
+// genuinely different payments would share a dedup key and the second would
+// vanish as a duplicate.
+const REF_BARE = /(?<!\d)(\d{12})(?!\d)/
+const NOT_A_REF = /a\/c|acc(?:ount)?\s*(?:no|number|#)|card\s*(?:no|number|ending)|xxxx/i
 
 export function extractRef(clean) {
   const m = clean.match(REF_LABELLED)
   if (m) return m[1]
-  const bare = clean.match(REF_BARE)
-  return bare ? bare[1] : null
+  for (const line of clean.split('\n')) {
+    if (NOT_A_REF.test(line)) continue
+    const bare = line.match(REF_BARE)
+    if (bare) return bare[1]
+  }
+  return null
 }
 
 // ── Direction ────────────────────────────────────────────────────────────────
@@ -213,7 +227,12 @@ export function isPersonal(payee) {
 // the key — without it, two ₹50 Swiggy orders on the same day collapse into one.
 export function synthRef({ txn_date, txn_time, amount, payee_raw }) {
   const slug = (payee_raw ?? 'unknown').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 12)
-  const t = txn_time ? txn_time.slice(0, 5).replace(':', '') : ''
+  // Seconds are kept only when the source actually had them. A parser that
+  // reads "2:14 pm" off a screenshot still produces the same key it always
+  // did, so re-uploading last week's screenshots is still a no-op — but a
+  // manual entry that deliberately sends the clock (ManualEntry) gets a key of
+  // its own, and two ₹20 chais a minute apart stay two rows.
+  const t = txn_time ? txn_time.slice(0, 8).replace(/:/g, '') : ''
   return `syn_${txn_date ?? 'nodate'}${t ? `T${t}` : ''}_${amount ?? 0}_${slug}`
 }
 

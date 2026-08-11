@@ -1,8 +1,10 @@
 import { useState } from 'react'
 import { parseStatement } from '../lib/statement'
 import { categoriseBatch, persistAILearnings } from '../lib/categorise'
-import { saveTransactions } from '../lib/db'
+import { saveTransactions, deleteTransactions } from '../lib/db'
 import { money } from '../lib/format'
+import CategoryIcon from '../components/CategoryIcon.jsx'
+import ScreenHeader from '../components/ScreenHeader.jsx'
 
 // BUILD_GUIDE.md §8.2. Screenshots catch ~70%. This is what makes the ledger
 // true rather than indicative.
@@ -42,11 +44,13 @@ function Skipped({ rows }) {
   )
 }
 
-export default function Import({ onChange }) {
+export default function Import({ onChange, onBack }) {
   const [file, setFile] = useState(null) // { name, rows, skipped, columns, header }
   const [busy, setBusy] = useState(false)
+  const [parsing, setParsing] = useState(false)
   const [result, setResult] = useState(null)
-  const [error, setError] = useState(null)
+  const [undone, setUndone] = useState(0)
+  const [error, setError] = useState(null) // a whole sentence — each path says its own thing
 
   async function pick(e) {
     const f = e.target.files?.[0]
@@ -54,11 +58,17 @@ export default function Import({ onChange }) {
     if (!f) return
     setError(null)
     setResult(null)
+    setFile(null)
+    // parseStatement walks the whole file on this thread, and a year of exported
+    // rows is a visible freeze. The read is awaited first so this paints before it.
+    setParsing(true)
     try {
-      setFile({ name: f.name, ...parseStatement(await f.text()) })
+      const text = await f.text()
+      setFile({ name: f.name, ...parseStatement(text) })
     } catch (err) {
-      setFile(null)
-      setError(err.message)
+      setError(`Couldn’t read this file. ${err.message}`)
+    } finally {
+      setParsing(false)
     }
   }
 
@@ -68,12 +78,39 @@ export default function Import({ onChange }) {
     try {
       const categorised = await categoriseBatch(file.rows)
       const saved = await saveTransactions(categorised)
-      await persistAILearnings(categorised)
+      // The rows are in the ledger from here on, so the result — and with it the
+      // only Undo there is — goes up before anything else gets to throw. The
+      // learning write is not allowed to report a 400-row import as "nothing
+      // was written"; Today.jsx fires it the same way.
       setResult({ ...saved, skipped: file.skipped })
+      setUndone(0)
       setFile(null)
       onChange?.()
+      persistAILearnings(categorised).catch(() => {}) // never block on this
     } catch (err) {
-      setError(err.message)
+      setError(`Import stopped. ${err.message} Nothing was written.`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /**
+   * Undo by the ids the insert handed back, not by date range — a range would
+   * also take rows that were already there. Offered only while the result is on
+   * screen: a wrong CSV is discovered immediately or not at all, and persisting
+   * a batch id for a regret you can also fix row by row is not worth a column.
+   */
+  async function undo() {
+    const ids = (result?.rows ?? []).map((r) => r.id)
+    if (ids.length === 0) return
+    setBusy(true)
+    try {
+      await deleteTransactions(ids)
+      setResult(null)
+      setUndone(ids.length)
+      onChange?.()
+    } catch (err) {
+      setError(`Couldn’t undo. ${err.message} The rows are still in the ledger.`)
     } finally {
       setBusy(false)
     }
@@ -84,16 +121,22 @@ export default function Import({ onChange }) {
 
   return (
     <div className="screen">
-      <p className="eyebrow">Reconcile</p>
-      <h1 className="title">Import a statement</h1>
+      <ScreenHeader title="Import a statement" onBack={onBack} />
       <p className="muted">
         Screenshots catch most days. A monthly export from GPay, PhonePe, Paytm or your bank
         catches the rest. Anything already logged is skipped.
       </p>
 
-      <input id="statement-file" type="file" accept=".csv,.txt" className="hidden-file" onChange={pick} />
+      <input
+        id="statement-file"
+        type="file"
+        accept=".csv,.txt"
+        className="hidden-file"
+        disabled={parsing}
+        onChange={pick}
+      />
       <label className="btn ghost" htmlFor="statement-file">
-        {file ? 'Choose a different file' : 'Choose a file'}
+        {parsing ? 'Reading the file…' : file ? 'Choose a different file' : 'Choose a file'}
       </label>
       <p className="muted">CSV or text export only.</p>
 
@@ -120,22 +163,28 @@ export default function Import({ onChange }) {
             <p className="empty">Nothing readable in this file.</p>
           ) : (
             <>
-              <ul className="ledger">
-                {file.rows.slice(0, 3).map((r, i) => (
-                  <li className="row" key={i}>
-                    <span className="dot" />
-                    <div className="who">
-                      <div className="name">{r.payee_raw ?? 'No description'}</div>
-                      <div className="meta">
-                        {r.txn_date}
-                        {r.method ? ` · ${r.method}` : ''}
-                        {r.txn_ref ? ` · ${r.txn_ref}` : ''}
+              <div className="card">
+                <ul className="ledger">
+                  {file.rows.slice(0, 3).map((r, i) => (
+                    <li key={i}>
+                      <div className="row">
+                        <CategoryIcon category="Other" />
+                        <div className="who">
+                          <div className="name">{r.payee_raw ?? 'No description'}</div>
+                          <div className="meta">
+                            {r.txn_date}
+                            {r.method ? ` · ${r.method}` : ''}
+                            {r.txn_ref ? ` · ${r.txn_ref}` : ''}
+                          </div>
+                        </div>
+                        <div className={`amt ${r.direction === 'credit' ? 'in' : 'out'}`}>
+                          {rupees(r.amount)}
+                        </div>
                       </div>
-                    </div>
-                    <div className={`amt ${r.direction === 'credit' ? 'in' : 'out'}`}>{rupees(r.amount)}</div>
-                  </li>
-                ))}
-              </ul>
+                    </li>
+                  ))}
+                </ul>
+              </div>
               <p className="muted">
                 {plural(file.rows.length, 'row', 'rows')} ready
                 {file.rows.length > 3 ? ', first three shown' : ''}.
@@ -171,11 +220,22 @@ export default function Import({ onChange }) {
             {result.duplicates > 0 && ` ${result.duplicates} already logged.`}
             {result.unusable > 0 && ` ${plural(result.unusable, 'row', 'rows')} had no description.`}
           </p>
+          {result.saved > 0 && (
+            <p>
+              <button className="linkish danger-link" disabled={busy} onClick={undo}>
+                Undo this import
+              </button>
+            </p>
+          )}
           <Skipped rows={result.skipped} />
         </>
       )}
 
-      {error && <p className="alert">Import stopped. {error} Nothing was written.</p>}
+      {undone > 0 && (
+        <p className="muted">Removed {plural(undone, 'row', 'rows')}. The ledger is back as it was.</p>
+      )}
+
+      {error && <p className="alert">{error}</p>}
     </div>
   )
 }

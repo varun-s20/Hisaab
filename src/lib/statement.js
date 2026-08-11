@@ -112,8 +112,12 @@ function readAmount(raw) {
   if (!s) return null
   const n = toNumber(s.replace(/[^\d.,]/g, ''))
   if (n == null) return null
-  const negative = /^[-(]/.test(s)
-  return { value: n, dir: dirFrom(s) ?? (negative ? 'debit' : null) }
+  // A single-amount column carries its direction in the sign. Reading '-' but
+  // not '+' meant "+5,000" fell through to the 'debit' default at the end of
+  // the chain below, and ₹5,000 received was booked as ₹5,000 spent — an error
+  // of ₹5,000 in money-out and another ₹5,000 in money-in, from one row.
+  const signed = /^[-(]/.test(s) ? 'debit' : /^\+/.test(s) ? 'credit' : null
+  return { value: n, dir: dirFrom(s) ?? signed }
 }
 
 const ISO_DATE = /\b(\d{4})-(\d{1,2})-(\d{1,2})\b/

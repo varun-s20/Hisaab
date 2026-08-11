@@ -1,79 +1,209 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { readBatch, preload } from '../lib/ocr'
 import { parseScreenshot } from '../lib/parse'
 import { categoriseBatch, persistAILearnings, learn } from '../lib/categorise'
-import { saveTransactions, listTransactions, updateTransaction } from '../lib/db'
-import { money, today, dayLabel, timeLabel, spendTotal } from '../lib/format'
-import { colorFor, CATEGORIES } from '../lib/categories'
+import { saveTransactions, listTransactions, updateTransaction, listBudgets, TOTAL_BUDGET } from '../lib/db'
+import { money, iso, today, dayLabel, timeLabel, spendTotal, startOfMonth, daysInMonth } from '../lib/format'
+import { TYPES } from '../lib/categories'
+import CategoryIcon from '../components/CategoryIcon.jsx'
+import CategoryPicker from '../components/CategoryPicker.jsx'
+import EditSheet from '../components/EditSheet.jsx'
+import Amount from '../components/Amount.jsx'
 import ManualEntry from '../components/ManualEntry.jsx'
+import { takeSharedFiles } from '../lib/share'
 
-// The Phase 1 screen. One button, one number, one line of summary.
-// Everything after the tap is automatic — the app only speaks when it's
-// genuinely unsure. BUILD_GUIDE.md §6.6.
+// Home. One sentence about the week, one number for today, one place to drop a
+// screenshot. Everything after the drop is automatic — the app only speaks when
+// it's genuinely unsure. BUILD_GUIDE.md §6.6.
+
+const HEADER = new Intl.DateTimeFormat('en-IN', { weekday: 'long', day: 'numeric', month: 'long' })
+
+const daysAgo = (n) => {
+  const d = new Date()
+  d.setDate(d.getDate() - n)
+  return iso(d)
+}
+
+const Rs = ({ n }) => (
+  <span className="num">
+    <span className="rupee">₹</span>
+    {money(n)}
+  </span>
+)
+
+/** Two weeks of spend turned into one sentence. No API call — the comparison is
+ *  arithmetic, and a narrative the app can't back with numbers is just noise. */
+function narrate(week, prev) {
+  if (week === 0) return { lede: 'Nothing logged in the last seven days.', tail: null }
+  if (prev === 0) return { lede: null, tail: 'First week on the ledger.' }
+  const pct = Math.round(((week - prev) / prev) * 100)
+  if (Math.abs(pct) < 8) return { lede: null, tail: 'Roughly the same as the week before.' }
+  return { lede: null, tail: `${Math.abs(pct)}% ${pct > 0 ? 'above' : 'below'} the week before.` }
+}
 
 export default function Today({ onChange, reviewCount, goReview }) {
   const fileRef = useRef(null)
-  const [rows, setRows] = useState([])
+  // A ref, not state: `ingest` closes over the state it was created with, so a
+  // second batch arriving mid-read would read a stale `false` and start anyway.
+  const reading = useRef(false)
+  const [rows, setRows] = useState([]) // last 14 days, for the week sentence
   const [busy, setBusy] = useState(null) // { done, total, stage }
+  const [nudge, setNudge] = useState('') // said once, while the read is running
   const [result, setResult] = useState(null)
+  const [pending, setPending] = useState(null) // categorised rows whose save failed
+  const [shared, setShared] = useState(null) // files off the share sheet, awaiting a tap
   const [manual, setManual] = useState(false)
+  const [over, setOver] = useState(false)
+  const [budget, setBudget] = useState(null) // { limit, spent } for the month
+
+  const load = useCallback(async () => {
+    // The month is fetched alongside the fortnight so the budget line and the
+    // week sentence come from one round trip rather than two.
+    const from = [daysAgo(13), startOfMonth()].sort()[0]
+    const r = await listTransactions({ from, to: today(), limit: 1000 })
+    setRows(r)
+    return r
+  }, [])
 
   useEffect(() => {
-    listTransactions({ from: today(), to: today() }).then(setRows).catch(() => {})
+    load().catch(() => {})
+    listBudgets()
+      .then((b) => setBudget(b.find((x) => x.category === TOTAL_BUDGET) ?? null))
+      .catch(() => {})
     // Warm Tesseract while the user is reading the screen, not after they tap.
     const id = setTimeout(preload, 400)
     return () => clearTimeout(id)
-  }, [])
+  }, [load])
 
-  async function refresh() {
-    const r = await listTransactions({ from: today(), to: today() })
-    setRows(r)
-    onChange?.()
-  }
-
-  async function handleFiles(e) {
-    const files = [...(e.target.files ?? [])]
-    e.target.value = '' // let the same files be picked again
-    if (files.length === 0) return
-
-    setResult(null)
-    setBusy({ done: 0, total: files.length, stage: 'reading' })
-    try {
-      const texts = await readBatch(files, (done, total) =>
-        setBusy({ done, total, stage: 'reading' }),
-      )
-      setBusy({ done: files.length, total: files.length, stage: 'sorting' })
-
-      // One history screenshot carries ~7 transactions, a receipt carries one.
-      const parsed = texts.flatMap((t) => parseScreenshot(t.text))
-
-      const categorised = await categoriseBatch(parsed)
-      const { saved, duplicates, unusable } = await saveTransactions(categorised)
+  // The save is the last step and the only one that needs the network, so a
+  // failure here costs a minute of OCR that was already correct. The rows stay
+  // in `pending` until one lands and the user can retry. Component state only,
+  // deliberately — they're gone on reload, which is an honest promise, where a
+  // queue that quietly drains hours later is not.
+  const save = useCallback(
+    async (categorised) => {
+      const saved = await saveTransactions(categorised)
       persistAILearnings(categorised).catch(() => {}) // never block on this
 
-      setResult({ saved, duplicates, unusable })
-      await refresh()
+      setPending(null)
+      setResult(saved)
+      await load()
+      onChange?.()
+    },
+    [load, onChange],
+  )
+
+  const ingest = useCallback(
+    async (files) => {
+      if (files.length === 0) return
+      // Two batches share one Tesseract worker and one progress bar: the second
+      // rewinds the bar, and the first to finish clears the indicator out from
+      // under the one still running. Paste fires even while the drop zone is
+      // swapped out for the progress card, so this is the only place to stop it.
+      if (reading.current) {
+        setNudge('Still reading the last batch — that one was skipped.')
+        return
+      }
+      reading.current = true
+      setNudge('')
+      setResult(null)
+      setPending(null)
+      setBusy({ done: 0, total: files.length, stage: 'reading' })
+      try {
+        const texts = await readBatch(files, (done, total) =>
+          setBusy({ done, total, stage: 'reading' }),
+        )
+        setBusy({ done: files.length, total: files.length, stage: 'sorting' })
+
+        // One history screenshot carries ~7 transactions, a receipt carries one.
+        const parsed = texts.flatMap((t) => parseScreenshot(t.text))
+
+        const categorised = await categoriseBatch(parsed)
+        setPending(categorised) // held from here on; a save that lands clears it
+        await save(categorised)
+      } catch (err) {
+        setResult({ error: err.message ?? String(err) })
+      } finally {
+        reading.current = false
+        setBusy(null)
+      }
+    },
+    [save],
+  )
+
+  // Same flag: saveTransactions dedupes against rows already in the table, but
+  // two of them in flight together would both find nothing and both insert.
+  async function retrySave() {
+    if (reading.current) return
+    reading.current = true
+    setResult(null)
+    try {
+      await save(pending)
     } catch (err) {
       setResult({ error: err.message ?? String(err) })
     } finally {
-      setBusy(null)
+      reading.current = false
     }
   }
 
-  const total = spendTotal(rows)
+  function handleFiles(e) {
+    const files = [...(e.target.files ?? [])]
+    e.target.value = '' // let the same files be picked again
+    ingest(files)
+  }
+
+  // Opened from Android's share sheet: the screenshots are already waiting.
+  // Parked, never ingested on arrival. The service worker takes any cross-origin
+  // POST to /share-target, so an automatic import lets a hostile page forge rows
+  // into a signed-in ledger without a gesture — and a cache entry left unread
+  // would land on whoever opens the app next on a shared phone. Nothing is read
+  // until the tap. No-op on every normal cold start.
+  useEffect(() => {
+    takeSharedFiles()
+      .then((files) => files.length > 0 && setShared(files))
+      .catch(() => {})
+  }, [])
+
+  // Paste is the fastest path on desktop: screenshot, Ctrl+V, done. No button.
+  useEffect(() => {
+    function onPaste(e) {
+      const imgs = [...(e.clipboardData?.files ?? [])].filter((f) => f.type.startsWith('image/'))
+      if (imgs.length > 0) ingest(imgs)
+    }
+    window.addEventListener('paste', onPaste)
+    return () => window.removeEventListener('paste', onPaste)
+  }, [ingest])
+
+  function onDrop(e) {
+    e.preventDefault()
+    setOver(false)
+    ingest([...(e.dataTransfer?.files ?? [])].filter((f) => f.type.startsWith('image/')))
+  }
+
+  const d = useMemo(() => {
+    const t = today()
+    const weekFrom = daysAgo(6)
+    const prevFrom = daysAgo(13)
+    const todays = rows.filter((r) => r.txn_date === t)
+    const week = spendTotal(rows.filter((r) => r.txn_date >= weekFrom))
+    const prev = spendTotal(rows.filter((r) => r.txn_date >= prevFrom && r.txn_date < weekFrom))
+    const month = spendTotal(rows.filter((r) => r.txn_date >= startOfMonth()))
+    const now = new Date()
+    return {
+      todays,
+      todayTotal: spendTotal(todays),
+      week,
+      prev,
+      month,
+      daysLeft: daysInMonth(now) - now.getDate(),
+      ...narrate(week, prev),
+    }
+  }, [rows])
 
   return (
     <div className="screen">
-      <div className="hero">
-        <div className="amount num out">
-          <span className="rupee">₹</span>
-          {money(total)}
-        </div>
-        {/* "logged", not "spent" — ₹0 means nothing was entered, which is not
-            the same claim as having spent nothing. */}
-        <div className="label">logged today</div>
-      </div>
-
+      {/* Outside .stagger — a display:none child would still claim a slot in
+          the reveal sequence and a gap in the rhythm. */}
       <input
         ref={fileRef}
         type="file"
@@ -83,23 +213,111 @@ export default function Today({ onChange, reviewCount, goReview }) {
         onChange={handleFiles}
       />
 
-      <button className="btn" disabled={Boolean(busy)} onClick={() => fileRef.current?.click()}>
-        {busy
-          ? busy.stage === 'reading'
-            ? `Reading ${busy.done} of ${busy.total}…`
-            : 'Sorting…'
-          : 'Add screenshots'}
-      </button>
+      <div className="stagger">
+        <p className="eyebrow">{HEADER.format(new Date())}</p>
 
-      {busy && (
-        <div className="progress" style={{ marginTop: 10 }}>
-          <i style={{ width: `${(busy.done / busy.total) * 100}%` }} />
+        <h1 className="lede">
+          {d.lede ?? (
+            <>
+              You&rsquo;ve spent <Rs n={d.week} /> this week.{' '}
+              {d.tail && <span className="dim">{d.tail}</span>}
+            </>
+          )}
+        </h1>
+
+        <div className="brand">
+          {/* "logged", not "spent" — ₹0 means nothing was entered, which is not
+              the same claim as having spent nothing. */}
+          <p className="caption">Logged today</p>
+          <Amount value={d.todayTotal} className="amount" />
+          <hr />
+          <div className="foot">
+            <div>
+              <span className="k">Last 7 days</span>
+              <b className="num">₹{money(d.week)}</b>
+            </div>
+            <div>
+              <span className="k">Daily average</span>
+              <b className="num">₹{money(d.week / 7)}</b>
+            </div>
+          </div>
         </div>
+
+        {budget && <BudgetLine limit={Number(budget.amount)} spent={d.month} daysLeft={d.daysLeft} />}
+
+        {shared && (
+          <SharedFiles
+            files={shared}
+            onImport={() => {
+              setShared(null)
+              ingest(shared)
+            }}
+            onDiscard={() => setShared(null)}
+          />
+        )}
+
+        {busy ? (
+          <div className="drop">
+            <div className="headline">
+              {busy.stage === 'reading' ? `Reading ${busy.done} of ${busy.total}` : 'Sorting'}…
+            </div>
+            <div className="sub">Screenshots are read on this device.</div>
+            <div className="progress">
+              <i style={{ width: `${(busy.done / busy.total) * 100}%` }} />
+            </div>
+            {/* Lives inside the progress card, so it clears itself when the read
+                ends rather than needing a timer. */}
+            {nudge && (
+              <div className="sub" role="status">
+                {nudge}
+              </div>
+            )}
+          </div>
+        ) : (
+          // A button, not the old <label>: the input is display:none, which takes
+          // it out of the tab order, and a label is not a tab stop either — so the
+          // one thing the app is for could not be reached without a pointer. The
+          // input still does the actual picking.
+          <button
+            type="button"
+            className={`drop${over ? ' over' : ''}`}
+            onClick={() => fileRef.current?.click()}
+            onDragOver={(e) => {
+              e.preventDefault()
+              setOver(true)
+            }}
+            onDragLeave={() => setOver(false)}
+            onDrop={onDrop}
+          >
+            <div className="headline">Drop a screenshot.</div>
+            <div className="sub">
+              I&rsquo;ll handle the rest — or tap to pick, or press{' '}
+              <span className="kbd">Ctrl</span> <span className="kbd">V</span>
+            </div>
+          </button>
+        )}
+
+        {result && (
+          <Found
+            result={result}
+            reviewCount={reviewCount}
+            goReview={goReview}
+            onRetry={pending ? retrySave : null}
+          />
+        )}
+      </div>
+
+      {!result && reviewCount > 0 && (
+        <p style={{ textAlign: 'center', marginTop: 16 }}>
+          <button className="linkish" onClick={goReview}>
+            {reviewCount} need{reviewCount === 1 ? 's' : ''} a look
+          </button>
+        </p>
       )}
 
-      <p style={{ textAlign: 'center', marginTop: 14, fontSize: 14 }}>
-        <button className="linkish" onClick={() => setManual((m) => !m)}>
-          {manual ? 'Close' : 'Add cash payment'}
+      <p style={{ textAlign: 'center', marginTop: 16 }}>
+        <button className="linkish quiet" onClick={() => setManual((m) => !m)}>
+          {manual ? 'Close' : 'Add a cash payment'}
         </button>
       </p>
 
@@ -107,79 +325,181 @@ export default function Today({ onChange, reviewCount, goReview }) {
         <ManualEntry
           onSaved={async () => {
             setManual(false)
-            await refresh()
+            await load()
+            onChange?.()
           }}
         />
       )}
 
-      {result && <Summary result={result} reviewCount={reviewCount} goReview={goReview} />}
-
-      {!result && reviewCount > 0 && (
-        <p style={{ textAlign: 'center', marginTop: 8 }}>
-          <button className="linkish alert" onClick={goReview}>
-            {reviewCount} need{reviewCount === 1 ? 's' : ''} a look
-          </button>
-        </p>
-      )}
-
       <h2 className="section">{dayLabel(today())}</h2>
-      {rows.length === 0 ? (
-        <p className="empty">Nothing logged today.</p>
+      {d.todays.length === 0 ? (
+        <div className="card">
+          <p className="empty">Nothing logged today.</p>
+        </div>
       ) : (
-        <ul className="ledger">
-          {rows.map((r) => (
-            <Row key={r.id} r={r} onChange={refresh} />
-          ))}
-        </ul>
+        <div className="card">
+          <ul className="ledger">
+            {d.todays.map((r) => (
+              <Row key={r.id} r={r} onChange={async () => { await load(); onChange?.() }} />
+            ))}
+          </ul>
+        </div>
       )}
     </div>
   )
 }
 
-function Summary({ result, reviewCount, goReview }) {
-  if (result.error) {
-    return (
-      <p className="alert" style={{ fontSize: 14, marginTop: 14 }}>
-        Couldn't save: {result.error}
-      </p>
-    )
-  }
-  const bits = [`${result.saved} saved`]
-  if (result.duplicates) bits.push(`${result.duplicates} already logged`)
-  // Rows the parser half-read are saved and flagged, so they're covered by the
-  // "needs a look" count. Only mention what genuinely couldn't be stored.
-  if (result.unusable) bits.push(`${result.unusable} not a payment`)
+/** The only line on this screen that is about the future rather than the past.
+ *  Shown only when a monthly budget exists — an empty progress bar is worse
+ *  than no bar. */
+function BudgetLine({ limit, spent, daysLeft }) {
+  const left = limit - spent
+  const pct = Math.min(100, (spent / limit) * 100)
+  const over = left < 0
   return (
-    <p style={{ textAlign: 'center', marginTop: 14, fontSize: 14 }} className="muted">
-      {bits.join(' · ')}
-      {reviewCount > 0 && (
-        <>
-          {' · '}
-          <button className="linkish alert" onClick={goReview}>
-            {reviewCount} need{reviewCount === 1 ? 's' : ''} a look
-          </button>
-        </>
-      )}
-    </p>
+    <div className="budgetline">
+      <div className="budgetline-top">
+        <span>
+          <b className="num">₹{money(Math.abs(left))}</b> {over ? 'over budget' : 'left this month'}
+        </span>
+        <span className="muted num">
+          {daysLeft} day{daysLeft === 1 ? '' : 's'} to go
+        </span>
+      </div>
+      <div className="budgetbar">
+        <i style={{ width: `${pct}%`, background: over ? 'var(--negative)' : 'var(--forest-green)' }} />
+      </div>
+    </div>
   )
 }
 
-// Tap a row to fix its category on the spot. One tap, one select, no modal.
+/** The gate on a share. Whatever arrived is named and counted, and it stays a
+ *  file on disk until this is tapped — a share is a request, not an instruction. */
+function SharedFiles({ files, onImport, onDiscard }) {
+  const n = files.length
+  return (
+    <div className="found">
+      <div className="head">
+        <div className="title">
+          {n} screenshot{n === 1 ? '' : 's'} shared
+        </div>
+        <p className="sub">Nothing is read or added to your ledger until you say so.</p>
+      </div>
+      <div style={{ display: 'flex', gap: 10, padding: '0 16px 16px' }}>
+        <button type="button" className="btn small" onClick={onImport}>
+          Import {n} screenshot{n === 1 ? '' : 's'}
+        </button>
+        <button type="button" className="btn ghost small" onClick={onDiscard}>
+          Discard
+        </button>
+      </div>
+    </div>
+  )
+}
+
+/** What the read actually produced, itemised. A count alone asks the user to go
+ *  and check; the rows themselves are the receipt. */
+function Found({ result, reviewCount, goReview, onRetry }) {
+  if (result.error) {
+    return (
+      <div style={{ marginTop: 16 }}>
+        <p className="alert" style={{ fontSize: 14, margin: 0 }}>
+          Couldn&rsquo;t save: {result.error}
+        </p>
+        {/* The reading and the sorting both worked — only the network didn't.
+            Retrying the save beats reading the screenshots a second time. */}
+        {onRetry && (
+          <button type="button" className="btn ghost small" style={{ marginTop: 10 }} onClick={onRetry}>
+            Retry save
+          </button>
+        )}
+      </div>
+    )
+  }
+
+  const found = result.rows ?? []
+  const notes = []
+  if (result.duplicates) notes.push(`${result.duplicates} already logged`)
+  if (result.unusable) notes.push(`${result.unusable} not a payment`)
+
+  if (found.length === 0) {
+    return (
+      <p className="muted" style={{ textAlign: 'center', marginTop: 16, fontSize: 14 }}>
+        {notes.length > 0 ? `Nothing new — ${notes.join(', ')}.` : 'Nothing readable in that.'}
+      </p>
+    )
+  }
+
+  return (
+    <div className="found">
+      <div className="head">
+        <div className="title">
+          I found {found.length} transaction{found.length === 1 ? '' : 's'}
+        </div>
+        <p className="sub">
+          Saved{notes.length > 0 ? ` · ${notes.join(' · ')}` : ''}
+          {reviewCount > 0 && (
+            <>
+              {' · '}
+              <button className="linkish" onClick={goReview}>
+                {reviewCount} need{reviewCount === 1 ? 's' : ''} a look
+              </button>
+            </>
+          )}
+        </p>
+      </div>
+      <ul className="ledger">
+        {found.slice(0, 6).map((r) => (
+          <li key={r.id}>
+            <div className="row">
+              <CategoryIcon category={r.category} />
+              <span className="who">
+                <span className="name">{r.payee_clean || r.payee_raw}</span>
+                <span className="meta">{r.category ?? 'Uncategorised'}</span>
+              </span>
+              <span className={`amt num ${r.direction === 'credit' ? 'in' : 'out'}`}>
+                {r.direction === 'credit' ? '+' : ''}
+                <span className="rupee">₹</span>
+                {money(r.amount)}
+              </span>
+            </div>
+          </li>
+        ))}
+      </ul>
+      {found.length > 6 && (
+        <p className="muted" style={{ fontSize: 12, padding: '10px 16px 12px', margin: 0 }}>
+          and {found.length - 6} more.
+        </p>
+      )}
+    </div>
+  )
+}
+
+// Tap a row to fix its category on the spot — one tap, one picker, no modal.
+// Everything else about the row lives behind "Edit details", so the daily
+// action stays one gesture and the rare one is still reachable.
 export function Row({ r, onChange, showDate = false }) {
   const [open, setOpen] = useState(false)
+  const [editing, setEditing] = useState(false)
   const credit = r.direction === 'credit'
   const meta = [
     showDate ? dayLabel(r.txn_date) : timeLabel(r.txn_time),
     r.category,
     r.type !== 'expense' ? r.type : null,
+    r.method,
+    r.note,
   ]
     .filter(Boolean)
     .join(' · ')
 
   return (
     <li>
-      <button className={`row ${r.needs_review ? 'flagged' : ''}`} onClick={() => setOpen((o) => !o)}>
-        <span className="dot" style={{ background: colorFor(r.category) }} />
+      <button
+        className={`row ${r.needs_review ? 'flagged' : ''}`}
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+      >
+        <CategoryIcon category={r.category} />
         <span className="who">
           <span className="name">{r.payee_clean || r.payee_raw}</span>
           <span className="meta">{meta}</span>
@@ -190,12 +510,35 @@ export function Row({ r, onChange, showDate = false }) {
           {money(r.amount)}
         </span>
       </button>
-      {open && <QuickEdit r={r} onDone={() => { setOpen(false); onChange?.() }} />}
+      {/* Kept mounted so the open/close is one interruptible transition rather
+          than a mount that pops. Collapsed it is 0fr tall and invisible, but a
+          picker, a select and a button in there are still tab stops and still
+          read aloud — thirty rows is ninety of them. `inert` takes the subtree
+          out of both the tab order and the accessibility tree, so aria-hidden
+          on top of it would be redundant. */}
+      <div className="reveal" data-open={open} inert={!open}>
+        <div>
+          <QuickEdit
+            r={r}
+            onDone={() => { setOpen(false); onChange?.() }}
+            onEdit={() => setEditing(true)}
+          />
+        </div>
+      </div>
+      {editing && (
+        <EditSheet
+          row={r}
+          open={editing}
+          onClose={() => setEditing(false)}
+          onSaved={() => { setOpen(false); onChange?.() }}
+          onDeleted={() => { setOpen(false); onChange?.() }}
+        />
+      )}
     </li>
   )
 }
 
-function QuickEdit({ r, onDone }) {
+function QuickEdit({ r, onDone, onEdit }) {
   const [saving, setSaving] = useState(false)
 
   async function set(patch, learnIt) {
@@ -209,28 +552,23 @@ function QuickEdit({ r, onDone }) {
   }
 
   return (
-    <div style={{ padding: '10px 0 16px' }}>
-      <label className="field">
-        <span>Category</span>
-        <select
-          disabled={saving}
-          value={r.category ?? ''}
-          onChange={(e) => set({ category: e.target.value }, true)}
-        >
-          <option value="">— pick —</option>
-          {CATEGORIES.map((c) => (
-            <option key={c} value={c}>{c}</option>
-          ))}
-        </select>
-      </label>
+    <div style={{ padding: '4px 16px 16px' }}>
+      <CategoryPicker
+        disabled={saving}
+        value={r.category ?? ''}
+        onChange={(c) => c && set({ category: c }, true)}
+      />
       <label className="field">
         <span>Type — transfers never count as spending</span>
         <select disabled={saving} value={r.type} onChange={(e) => set({ type: e.target.value })}>
-          {['expense', 'income', 'transfer', 'refund', 'lent', 'repaid'].map((t) => (
+          {TYPES.map((t) => (
             <option key={t} value={t}>{t}</option>
           ))}
         </select>
       </label>
+      <button type="button" className="btn ghost small" onClick={onEdit}>
+        Edit details
+      </button>
     </div>
   )
 }

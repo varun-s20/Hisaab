@@ -1,4 +1,4 @@
--- Paisa schema — run this once in the Supabase SQL editor.
+-- Hisaab schema — run this once in the Supabase SQL editor.
 -- Safe to re-run: everything is guarded with "if not exists".
 
 -- ── Transactions: one row per payment ──────────────────────────────────────
@@ -58,6 +58,21 @@ create table if not exists merchant_map (
   unique (user_id, payee_pattern)
 );
 
+-- ── Budgets: the one number the ledger can't derive ───────────────────────
+-- One monthly cap per category. The reserved category '*' is the cap for the
+-- whole month across every category — a sentinel rather than a second table,
+-- because everything else about it (upsert, delete, RLS) is identical.
+-- A custom category can never be named '*': addCategory() trims and the picker
+-- has no way to produce it.
+create table if not exists budgets (
+  id            uuid primary key default gen_random_uuid(),
+  user_id       uuid references auth.users(id) default auth.uid(),
+  category      text not null,
+  amount        numeric(12,2) not null check (amount > 0),
+  created_at    timestamptz default now(),
+  unique (user_id, category)
+);
+
 -- ── Row level security: nobody sees anyone else's money ───────────────────
 -- Migration for a database created before unreadable rows were stored rather
 -- than dropped. No-op on a fresh schema.
@@ -65,6 +80,7 @@ alter table transactions alter column amount drop not null;
 
 alter table transactions enable row level security;
 alter table merchant_map enable row level security;
+alter table budgets enable row level security;
 
 drop policy if exists "own rows" on transactions;
 create policy "own rows" on transactions
@@ -72,4 +88,8 @@ create policy "own rows" on transactions
 
 drop policy if exists "own map" on merchant_map;
 create policy "own map" on merchant_map
+  for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+drop policy if exists "own budgets" on budgets;
+create policy "own budgets" on budgets
   for all using (auth.uid() = user_id) with check (auth.uid() = user_id);

@@ -1,4 +1,4 @@
-# Paisa — Build Guide
+# Hisaab — Build Guide
 
 A privacy-first, zero-cost UPI expense tracker PWA.
 Upload screenshots, get a real ledger. No manual entry.
@@ -116,7 +116,7 @@ Accounts to create (all free, ~15 minutes):
 1. **Supabase** — supabase.com, create a project. Note the project URL and `anon` key.
 2. **Google AI Studio** — aistudio.google.com, create an API key. **Check the live rate limits shown for your project** — published numbers in blog posts are unreliable and quotas have been cut before.
 3. **Vercel** — vercel.com, connect to a GitHub repo.
-4. **Domain** — user already owns two. Point a subdomain (e.g. `paisa.yourdomain.com`) at Vercel via CNAME.
+4. **Domain** — user already owns two. Point a subdomain (e.g. `hisaab.yourdomain.com`) at Vercel via CNAME.
 
 Local tooling: Node 20+, npm, git.
 
@@ -247,8 +247,8 @@ Expected: payment screenshots are crisp digital text at high contrast — near-i
 ### 6.2 Project setup
 
 ```bash
-npm create vite@latest paisa -- --template react
-cd paisa
+npm create vite@latest hisaab -- --template react
+cd hisaab
 npm install tesseract.js @supabase/supabase-js
 npm install -D vite-plugin-pwa
 ```
@@ -267,8 +267,8 @@ export default defineConfig({
       registerType: 'autoUpdate',
       includeAssets: ['icon-192.png', 'icon-512.png'],
       manifest: {
-        name: 'Paisa',
-        short_name: 'Paisa',
+        name: 'Hisaab',
+        short_name: 'Hisaab',
         start_url: '/',
         display: 'standalone',
         background_color: '#0E1012',
@@ -628,7 +628,7 @@ git init && git add . && git commit -m "init"
 In Vercel project settings:
 
 - **Environment variables:** `GEMINI_API_KEY` (server-side), `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`
-- **Domains:** add `paisa.yourdomain.com`, set the CNAME at your registrar as instructed
+- **Domains:** add `hisaab.yourdomain.com`, set the CNAME at your registrar as instructed
 
 **Install on the phone:** open the URL in Chrome on Android → menu → *Add to Home screen*. It gets its own icon and launches full-screen with no browser chrome.
 
@@ -643,7 +643,7 @@ In Vercel project settings:
 ## 11. Daily use
 
 1. Pay for things through the day, screenshot as you already do
-2. 9pm alarm → open Paisa → tap *Add screenshots* → multi-select the day's
+2. 9pm alarm → open Hisaab → tap *Add screenshots* → multi-select the day's
 3. Watch the count tick up, see the total
 4. Ignore it unless something says "needs a look"
 5. Once a week, 30 seconds on the *Teach me* screen

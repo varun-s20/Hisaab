@@ -1,7 +1,10 @@
 import { useEffect, useState } from 'react'
 import { listUntaught, recategoriseMerchant } from '../lib/db'
 import { learn } from '../lib/categorise'
-import { CATEGORIES, colorFor } from '../lib/categories'
+import { postJson } from '../lib/api'
+import { CATEGORIES, allCategories } from '../lib/categories'
+import CategoryPicker from '../components/CategoryPicker.jsx'
+import ScreenHeader from '../components/ScreenHeader.jsx'
 import { seedLookup, TYPE_FOR_CATEGORY } from '../lib/seeds'
 import { money } from '../lib/format'
 
@@ -10,34 +13,32 @@ import { money } from '../lib/format'
 // exists to prevent. The rest are still there next week.
 const MAX = 8
 
-/** One batched call, merchant names only — same guarantee as the import path. */
+/** One batched call, merchant names only — same guarantee as the import path.
+ *  The category list rides along so a category you invented is one the model
+ *  can actually pick; it lives in localStorage, which the server can't see. */
 async function suggest(merchants) {
-  try {
-    const r = await fetch('/api/categorise', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ merchants: merchants.slice(0, 50) }),
-    })
-    if (!r.ok) return {}
-    const { results } = await r.json()
-    return Object.fromEntries(
-      (results ?? [])
-        .filter((x) => CATEGORIES.includes(x.category))
-        .map((x) => [x.merchant, x.category]),
-    )
-  } catch {
-    return {} // No suggestions is fine. The dropdowns still work.
-  }
+  const categories = allCategories()
+  const body = await postJson('/api/categorise', { merchants: merchants.slice(0, 50), categories })
+  // No suggestions is fine. The picker still works.
+  return Object.fromEntries(
+    (body?.results ?? [])
+      .filter((x) => categories.includes(x.category))
+      .map((x) => [x.merchant, x.category]),
+  )
 }
 
-export default function Teach({ onChange }) {
+export default function Teach({ onChange, onBack }) {
   const [rows, setRows] = useState(null) // null until the first load lands
   const [picks, setPicks] = useState({}) // payee_raw → category, what Save writes
   const [suggested, setSuggested] = useState({}) // which of those came from the AI
-  const [saving, setSaving] = useState(false)
+  const [saving, setSaving] = useState(null) // { done, total } while Save runs
   const [toast, setToast] = useState(null)
+  // Kept out of the toast: a toast clears itself, and "couldn't load" is a state
+  // the screen has to keep saying until someone retries it.
+  const [loadErr, setLoadErr] = useState(null)
 
   async function load() {
+    setLoadErr(null)
     try {
       const next = await listUntaught()
       setRows(next)
@@ -64,8 +65,9 @@ export default function Teach({ onChange }) {
         }
       }
     } catch (e) {
-      setRows([])
-      setToast(e.message || String(e))
+      // Not setRows([]) — an empty list means "the map's caught up", which is a
+      // claim about rows we never managed to see.
+      setLoadErr(e.message || String(e))
     }
   }
 
@@ -84,9 +86,14 @@ export default function Teach({ onChange }) {
 
   async function save() {
     if (taught.length === 0) return
-    setSaving(true)
+    const total = taught.length
+    let done = 0
     try {
       for (const r of taught) {
+        // Sequential on purpose — sixteen writes at once is a burst the server
+        // has no reason to absorb. Counted, because a stall at row 5 of 8 with a
+        // button that only says "Saving…" is indistinguishable from a hang.
+        setSaving({ done, total })
         const category = picks[r.payee_raw]
         // 'user' even for a guess the user didn't edit: they saw it on screen
         // and pressed Save. That's approval, and it should outrank any later
@@ -98,29 +105,49 @@ export default function Teach({ onChange }) {
           payee_clean: r.payee_raw,
           type: TYPE_FOR_CATEGORY[category] ?? 'expense',
         })
+        done += 1
       }
-      const n = taught.length
       const p = taught.reduce((s, r) => s + r.count, 0)
-      setToast(`Learned ${n}. ${p} past payment${p === 1 ? '' : 's'} recategorised.`)
+      setToast(`Learned ${total}. ${p} past payment${p === 1 ? '' : 's'} recategorised.`)
+    } catch (e) {
+      // ponytail: no rollback. learn + recategorise are both idempotent, so the
+      // rows that didn't land are safe to Save again. Say how far it got — the
+      // ones already taught are gone from the list after the reload below, and
+      // a bare error message next to a shorter list explains nothing.
+      const why = e.message || String(e)
+      setToast(done > 0 ? `Saved ${done} of ${total}, then stopped. ${why}` : why)
+    } finally {
+      setSaving(null)
+      // Reload on the failure path too: it is the only thing that shows which
+      // rows actually made it.
       await load()
       onChange?.()
-    } catch (e) {
-      // ponytail: no rollback, no retry loop. learn + recategorise are both
-      // idempotent, so the picks stay on screen and Save again is safe.
-      setToast(e.message || String(e))
-    } finally {
-      setSaving(false)
     }
   }
 
-  if (rows === null) return <div className="screen" />
+  // Blank until the first load lands. A load that failed is not still landing.
+  if (rows === null && !loadErr) return <div className="screen" />
 
-  const more = rows.length - shown.length
+  const more = (rows?.length ?? 0) - shown.length
 
-  if (shown.length === 0) {
+  if (loadErr || shown.length === 0) {
     return (
       <div className="screen">
-        <p className="empty">Nothing new to teach. The map's caught up.</p>
+        <ScreenHeader title="Teach me" onBack={onBack} />
+        <div className="card">
+          {loadErr ? (
+            <div className="card-body">
+              <p className="alert" style={{ margin: '0 0 12px' }}>
+                Couldn&rsquo;t load this. {loadErr}
+              </p>
+              <button className="btn ghost small" onClick={load}>
+                Try again
+              </button>
+            </div>
+          ) : (
+            <p className="empty">Nothing new to teach. The map's caught up.</p>
+          )}
+        </div>
         {toast && <div className="toast">{toast}</div>}
       </div>
     )
@@ -128,57 +155,55 @@ export default function Teach({ onChange }) {
 
   return (
     <div className="screen">
-      <h1 className="title">
-        Teach me {shown.length} thing{shown.length === 1 ? '' : 's'}
-      </h1>
+      <ScreenHeader
+        title={`Teach me ${shown.length} thing${shown.length === 1 ? '' : 's'}`}
+        onBack={onBack}
+      />
 
-      <ul className="ledger">
-        {shown.map((r) => {
-          // Whatever the dropdown shows is what Save writes. A prefilled value
-          // that quietly saved nothing would make the dropdown a lie about the
-          // button. Clear it back to "— pick —" to skip a row.
-          const picked = picks[r.payee_raw]
-          return (
-            <li className="row" key={r.payee_raw}>
-              <span className="dot" style={picked ? { background: colorFor(picked) } : undefined} />
-              <div className="who">
-                <div className="name num">{r.payee_raw}</div>
-                <div className="meta">
-                  <span className="num">
-                    <span className="rupee">₹</span>
-                    {money(r.total)}
-                  </span>
-                  {' · '}
-                  {r.count} payment{r.count === 1 ? '' : 's'}
-                  {suggested[r.payee_raw] && picked === suggested[r.payee_raw] && ' · guessed'}
+      <div className="card">
+        <ul className="ledger">
+          {shown.map((r) => {
+            // Whatever the dropdown shows is what Save writes. A prefilled value
+            // that quietly saved nothing would make the dropdown a lie about the
+            // button. Clear it back to "— pick —" to skip a row.
+            const picked = picks[r.payee_raw]
+            return (
+              <li key={r.payee_raw}>
+                <div className="row teachrow">
+                  <div className="who">
+                    <div className="name">{r.payee_raw}</div>
+                    <div className="meta">
+                      <span className="num">
+                        <span className="rupee">₹</span>
+                        {money(r.total)}
+                      </span>
+                      {' · '}
+                      {r.count} payment{r.count === 1 ? '' : 's'}
+                      {suggested[r.payee_raw] && picked === suggested[r.payee_raw] && ' · guessed'}
+                    </div>
+                  </div>
+                  <CategoryPicker
+                    compact
+                    value={picked ?? ''}
+                    placeholder="Pick"
+                    onChange={(c) => setPicks((p) => ({ ...p, [r.payee_raw]: c }))}
+                  />
                 </div>
-              </div>
-              <select
-                aria-label={`Category for ${r.payee_raw}`}
-                value={picked ?? ''}
-                onChange={(e) => setPicks((p) => ({ ...p, [r.payee_raw]: e.target.value }))}
-              >
-                <option value="">— pick —</option>
-                {CATEGORIES.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
-                ))}
-              </select>
-            </li>
-          )
-        })}
-      </ul>
+              </li>
+            )
+          })}
+        </ul>
+      </div>
 
       {more > 0 && <p className="muted" style={{ fontSize: 12 }}>{more} more after these.</p>}
 
       <button
         className="btn"
         style={{ marginTop: 20 }}
-        disabled={saving || taught.length === 0}
+        disabled={saving !== null || taught.length === 0}
         onClick={save}
       >
-        {saving ? 'Saving…' : 'Save'}
+        {saving ? `Saving ${saving.done + 1} of ${saving.total}…` : 'Save'}
       </button>
 
       {toast && <div className="toast">{toast}</div>}

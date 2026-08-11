@@ -1,25 +1,92 @@
-/* Paisa — cool ink, warm money. BUILD_GUIDE.md §9.
-   Opened once a day, at night, one-handed, for under two minutes.
-   It is a ledger, not a dashboard. */
+/* Hisaab — Wise design language, light-first, card-based.
+   Every hex marked (wise) was read off wise.com's live Neptune tokens.
+   Motion follows Emil Kowalski: custom curves, nothing over 300ms, enter
+   ease-out, press feedback on everything tappable, transitions over keyframes
+   wherever the thing can be re-triggered. */
 
 :root {
-  --ink: #0e1012;
-  --surface: #181b1e;
-  --surface-2: #1f2327;
-  --rule: #262a2e;
-  --text: #e8e6e1;
-  --muted: #8a8f94;
-  --out: #e8a33d; /* debits — warm gold, reads as currency */
-  --in: #6fb3a0; /* credits — deliberately quieter than out */
-  --alert: #d9634f;
+  /* ── Wise brand primitives (wise) ─────────────────────────────────────── */
+  --bright-green: #9fe870;
+  --bright-green-hover: #cdffad;
+  --forest-green: #163300;
+  --forest-green-elevated: #223d0d;
+  --light-green: #e2f6d5;
 
-  --pad: 20px;
-  --radius: 12px;
+  /* ── Type ─────────────────────────────────────────────────────────────── */
+  /* Geist for the interface — it ships genuine tabular figures, which is the
+     one typographic thing a ledger cannot do without. */
+  --sans: 'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  /* Bricolage Grotesque for everything with a voice. */
+  --display: 'Bricolage Grotesque', 'Geist', -apple-system, BlinkMacSystemFont, sans-serif;
 
-  /* ponytail: system stack, no webfont request. Roboto/SF/Segoe all ship
-     tabular figures, which is the only typographic thing that matters here. */
-  --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+  /* ── Shape ────────────────────────────────────────────────────────────── */
+  --pad: 18px;
+  --radius-sm: 12px;
+  --radius: 18px;
+  --radius-lg: 26px;
+  --radius-pill: 999px;
 
+  /* ── Motion. The built-in CSS easings are too weak to read as intentional. */
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+
+  /* ── Light theme (wise). The page is Wise's neutral solid, cards are pure
+        white, so a card lifts off the page without needing a heavy shadow. ── */
+  --screen: #f1f1ed;
+  --card: #ffffff;
+  --sunken: #f7f7f4;
+  --neutral: rgba(22, 51, 0, 0.06);
+  --neutral-hover: rgba(22, 51, 0, 0.1);
+  --text: #0e0f0c;
+  --text-2: #454745;
+  --muted: #6a6c6a;
+  --rule: rgba(14, 15, 12, 0.09);
+  --rule-strong: rgba(14, 15, 12, 0.16);
+  --accent: #9fe870;
+  --accent-ink: #163300;
+  --link: #163300;
+
+  --positive: #008026;
+  --negative: #cf2929;
+  --warning: #9a6500;
+
+  /* Spend is the neutral default — Wise never paints a normal payment as an
+     alarm. Only money arriving gets colour. */
+  --out: var(--text);
+  --in: #008026;
+
+  /* recharts needs a literal, not a var(). Insights reads these off :root. */
+  --chart-line: #163300;
+  --chart-ghost: #9a9c98;
+
+  --shadow-card: 0 1px 2px rgba(14, 15, 12, 0.04), 0 6px 16px -6px rgba(14, 15, 12, 0.08);
+  --shadow-lift: 0 2px 4px rgba(14, 15, 12, 0.05), 0 14px 30px -12px rgba(14, 15, 12, 0.16);
+
+  color-scheme: light;
+}
+
+/* Dark stays available but is no longer the default — set data-theme="dark" on
+   <html>. Values are Wise's own .np-theme-personal--dark, read live (wise). */
+:root[data-theme='dark'] {
+  --screen: #121511;
+  --card: #1e211d;
+  --sunken: #191c18;
+  --neutral: rgba(255, 255, 255, 0.08);
+  --neutral-hover: rgba(255, 255, 255, 0.14);
+  --text: #f3f5f1;
+  --text-2: #cacfc7;
+  --muted: rgba(243, 245, 241, 0.56);
+  --rule: rgba(255, 255, 255, 0.12);
+  --rule-strong: rgba(255, 255, 255, 0.22);
+  --link: #9fe870;
+  --positive: #9fe870;
+  --negative: #ff8787;
+  --warning: #fadc65;
+  --in: #9fe870;
+  --chart-line: #9fe870;
+  --chart-ghost: #8a8f87;
+  --shadow-card: none;
+  --shadow-lift: none;
   color-scheme: dark;
 }
 
@@ -29,34 +96,47 @@ html, body, #root { height: 100%; }
 
 body {
   margin: 0;
-  background: var(--ink);
+  background: var(--screen);
   color: var(--text);
   font-family: var(--sans);
   font-size: 16px;
   line-height: 1.45;
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  /* Bricolage carries an opsz axis; this lets the browser drive it from the
+     rendered size, so the 52px hero figure and the 15px section head are drawn
+     with the right stroke contrast instead of one scaled to both. */
+  font-optical-sizing: auto;
   overscroll-behavior-y: none;
 }
 
 button, input, select, textarea { font: inherit; color: inherit; }
 button { cursor: pointer; }
 
-/* Amounts. Non-negotiable: columns of rupee figures that don't align look amateur. */
+::selection { background: var(--bright-green); color: var(--forest-green); }
+
+:focus-visible {
+  outline: 2px solid var(--forest-green);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+/* Amounts. Columns of rupee figures that don't align look amateur. */
 .num {
   font-variant-numeric: tabular-nums;
   font-feature-settings: 'tnum' 1, 'lnum' 1;
   letter-spacing: -0.01em;
 }
 .rupee {
-  font-size: 0.78em;
-  vertical-align: 0.08em;
-  margin-right: 0.12em;
-  opacity: 0.75;
+  font-size: 0.74em;
+  vertical-align: 0.1em;
+  margin-right: 0.1em;
+  opacity: 0.55;
 }
 
 .out { color: var(--out); }
 .in { color: var(--in); }
-.alert { color: var(--alert); }
+.alert { color: var(--negative); }
 .muted { color: var(--muted); }
 
 /* ── Shell ───────────────────────────────────────────────────────────────── */
@@ -64,36 +144,90 @@ button { cursor: pointer; }
   display: flex;
   flex-direction: column;
   min-height: 100%;
-  max-width: 520px;
+  max-width: 540px;
   margin: 0 auto;
-  padding-bottom: calc(64px + env(safe-area-inset-bottom));
+  padding-bottom: calc(84px + env(safe-area-inset-bottom));
 }
 
 .screen {
   flex: 1;
-  padding: calc(env(safe-area-inset-top) + 18px) var(--pad) 24px;
-  animation: rise 0.22s ease-out;
+  padding: calc(env(safe-area-inset-top) + 20px) var(--pad) 28px;
 }
 
+/* One orchestrated page reveal. Keyframes are correct here — a page mount is
+   not re-triggered mid-flight, so there is nothing to interrupt. */
 @keyframes rise {
-  from { opacity: 0; transform: translateY(6px); }
+  from { opacity: 0; transform: translateY(10px); }
   to { opacity: 1; transform: none; }
 }
 
+/* One rhythm for the top of every screen, so no child has to carry its own
+   inline margin and no two screens end up spaced differently. */
+.stagger > * { animation: rise 0.34s var(--ease-out) backwards; margin-bottom: 0; }
+.stagger > * + * { margin-top: 14px; }
+.stagger > .eyebrow { margin-bottom: 0; }
+.stagger > .eyebrow + * { margin-top: 6px; }
+.stagger > h1.lede,
+.stagger > h1.title { margin: 0; }
+.stagger > *:nth-child(1) { animation-delay: 0ms; }
+.stagger > *:nth-child(2) { animation-delay: 45ms; }
+.stagger > *:nth-child(3) { animation-delay: 90ms; }
+.stagger > *:nth-child(4) { animation-delay: 135ms; }
+.stagger > *:nth-child(5) { animation-delay: 180ms; }
+.stagger > *:nth-child(6) { animation-delay: 225ms; }
+
+/* Reduced motion means fewer and gentler, not zero. Comprehension-carrying
+   fades stay; everything that moves in space goes. */
 @media (prefers-reduced-motion: reduce) {
-  * { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
+  @keyframes rise {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+  *, *::before, *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.2s !important;
+    animation-delay: 0ms !important;
+  }
 }
 
 .eyebrow {
-  font-size: 11px;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
+  font-size: 12.5px;
+  font-weight: 500;
   color: var(--muted);
-  margin: 0 0 6px;
+  margin: 0 0 8px;
 }
 
-h1.title { font-size: 21px; font-weight: 600; margin: 0 0 18px; }
-h2.section { font-size: 13px; font-weight: 600; color: var(--muted); margin: 28px 0 10px; }
+h1.title {
+  font-family: var(--display);
+  /* Clamped, not fixed — a 30px display face wraps to three lines on a 320px
+     phone and the card below it stops being the first thing you see. */
+  font-size: clamp(24px, 7.6vw, 30px);
+  font-weight: 700;
+  letter-spacing: -0.028em;
+  line-height: 1.12;
+  margin: 0 0 20px;
+}
+
+/* The narrative headline. Wise writes in sentences, not labels. */
+h1.lede {
+  font-family: var(--display);
+  font-size: clamp(22px, 6.9vw, 27px);
+  font-weight: 700;
+  letter-spacing: -0.028em;
+  line-height: 1.2;
+  margin: 0 0 14px;
+  text-wrap: balance;
+}
+h1.lede .dim { color: var(--muted); font-weight: 500; }
+
+h2.section {
+  font-family: var(--display);
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  margin: 30px 0 10px;
+}
 
 /* ── Nav ─────────────────────────────────────────────────────────────────── */
 .nav {
@@ -103,173 +237,1095 @@ h2.section { font-size: 13px; font-weight: 600; color: var(--muted); margin: 28p
   right: 0;
   display: flex;
   justify-content: center;
-  gap: 4px;
-  padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
-  background: color-mix(in srgb, var(--ink) 88%, transparent);
-  backdrop-filter: blur(12px);
+  gap: 2px;
+  padding: 9px 10px calc(9px + env(safe-area-inset-bottom));
+  background: color-mix(in srgb, var(--screen) 82%, transparent);
+  backdrop-filter: saturate(180%) blur(18px);
   border-top: 1px solid var(--rule);
   z-index: 20;
 }
 .nav button {
   flex: 1;
-  max-width: 120px;
+  max-width: 124px;
   background: none;
   border: 0;
-  padding: 9px 4px;
-  font-size: 12px;
+  padding: 10px 6px;
+  font-size: 13px;
+  font-weight: 500;
   color: var(--muted);
-  border-radius: 8px;
+  border-radius: var(--radius-pill);
+  /* Named properties only — `all` would sweep in layout-triggering ones. */
+  transition: color 180ms var(--ease-out), background-color 180ms var(--ease-out),
+    transform 140ms var(--ease-out);
 }
-.nav button[aria-current='true'] { color: var(--text); background: var(--surface); }
+.nav button:active { transform: scale(0.95); }
+/* Forest, not bright — the bright-green panel is the loudest thing on the
+   screen and a second bright-green block at the bottom fights it. */
+.nav button[aria-current='true'] {
+  color: var(--bright-green);
+  background: var(--forest-green);
+  font-weight: 600;
+}
 .nav .badge {
   display: inline-block;
-  min-width: 16px;
-  margin-left: 5px;
-  padding: 0 4px;
-  border-radius: 8px;
-  background: var(--alert);
-  color: var(--ink);
+  min-width: 17px;
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: var(--radius-pill);
+  background: var(--negative);
+  color: #fff;
   font-size: 10px;
   font-weight: 700;
+  vertical-align: 1px;
+}
+.nav button[aria-current='true'] .badge { background: var(--bright-green); color: var(--forest-green); }
+
+/* ── Screen header with back ─────────────────────────────────────────────── */
+.screenhead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 18px;
+}
+.screenhead h1.title { margin: 0; flex: 1; min-width: 0; }
+
+.iconbtn {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  flex: none;
+  margin-left: -10px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  color: var(--text);
+  transition: background-color 160ms var(--ease-out), transform 140ms var(--ease-out);
+}
+.iconbtn:active { transform: scale(0.92); }
+.iconbtn svg { width: 22px; height: 22px; }
+.iconbtn.sm { width: 30px; height: 30px; margin: 0; }
+.iconbtn.sm svg { width: 15px; height: 15px; }
+@media (hover: hover) and (pointer: fine) {
+  .iconbtn:hover { background: var(--neutral); }
 }
 
-/* ── Hero total ──────────────────────────────────────────────────────────── */
-.hero { text-align: center; padding: 26px 0 8px; }
-.hero .amount { font-size: 46px; font-weight: 300; line-height: 1.05; }
-.hero .label { color: var(--muted); font-size: 14px; margin-top: 6px; }
+/* ── Range: segmented control + period stepper ───────────────────────────── */
+.rangebar { margin-bottom: 14px; }
 
-/* ── Buttons ─────────────────────────────────────────────────────────────── */
+.segmented {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 2px;
+  padding: 3px;
+  background: var(--neutral);
+  border-radius: var(--radius-pill);
+}
+.segmented button {
+  padding: 9px 4px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: none;
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--muted);
+  transition: background-color 180ms var(--ease-out), color 180ms var(--ease-out),
+    transform 140ms var(--ease-out);
+}
+.segmented button:active { transform: scale(0.96); }
+.segmented button[aria-selected='true'] {
+  background: var(--card);
+  color: var(--text);
+  font-weight: 600;
+  box-shadow: var(--shadow-card);
+}
+
+.stepper {
+  display: grid;
+  grid-template-columns: 40px 1fr 40px;
+  align-items: center;
+  margin-top: 10px;
+}
+.stepper button {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  color: var(--text);
+  transition: background-color 160ms var(--ease-out), transform 140ms var(--ease-out),
+    opacity 160ms var(--ease-out);
+}
+.stepper button svg { width: 20px; height: 20px; }
+.stepper button:active:not(:disabled) { transform: scale(0.9); }
+.stepper button:disabled { opacity: 0.25; cursor: default; }
+@media (hover: hover) and (pointer: fine) {
+  .stepper button:hover:not(:disabled) { background: var(--neutral); }
+}
+.stepper-label {
+  text-align: center;
+  font-family: var(--display);
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.customrange { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
+.customrange .field { margin-bottom: 0; }
+
+/* ── In / out / net ──────────────────────────────────────────────────────── */
+.totals {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  padding: 15px 16px;
+  margin-bottom: 12px;
+}
+.totals .k { display: block; font-size: 12px; color: var(--muted); }
+.totals .v {
+  display: block;
+  font-family: var(--display);
+  /* Three money figures across a 320px phone. The floor has to be low enough
+     that a six-digit net still fits its column instead of clipping. */
+  font-size: clamp(13px, 4.4vw, 19px);
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  margin-top: 3px;
+  white-space: nowrap;
+}
+.totals > * + * { border-left: 1px solid var(--rule); padding-left: 10px; }
+
+/* ── Filter chips ────────────────────────────────────────────────────────── */
+.chips { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 2px; margin-bottom: 12px; }
+.chips::-webkit-scrollbar { display: none; }
+.chips button {
+  flex: none;
+  padding: 8px 15px;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-pill);
+  background: var(--card);
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--text-2);
+  white-space: nowrap;
+  transition: background-color 180ms var(--ease-out), color 180ms var(--ease-out),
+    border-color 180ms var(--ease-out), transform 140ms var(--ease-out);
+}
+.chips button:active { transform: scale(0.96); }
+.chips button[aria-selected='true'] {
+  background: var(--forest-green);
+  border-color: var(--forest-green);
+  color: var(--bright-green);
+  font-weight: 600;
+}
+
+/* ── Search ──────────────────────────────────────────────────────────────── */
+.search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px 0 13px;
+  margin-bottom: 14px;
+  background: var(--card);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-pill);
+  transition: border-color 160ms var(--ease-out), box-shadow 160ms var(--ease-out);
+}
+.search:focus-within {
+  border-color: var(--forest-green);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--bright-green) 50%, transparent);
+}
+.search svg { width: 18px; height: 18px; flex: none; color: var(--muted); }
+/* Typed selector for the same reason as .askbar — see the note there. */
+.search input[type='text'] {
+  flex: 1;
+  min-width: 0;
+  padding: 12px 0;
+  border: 0;
+  background: none;
+  border-radius: 0;
+  box-shadow: none;
+}
+/* The wrapper owns the ring, so the input must not draw its own. */
+.search input[type='text']:focus { border: 0; box-shadow: none; outline: none; }
+
+/* ── Ask ─────────────────────────────────────────────────────────────────── */
+.askentry {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 14px 16px;
+  background: var(--card);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-pill);
+  color: var(--muted);
+  font-size: 15px;
+  text-align: left;
+  box-shadow: var(--shadow-card);
+  transition: border-color 180ms var(--ease-out), transform 140ms var(--ease-out),
+    box-shadow 180ms var(--ease-out);
+}
+.askentry svg { width: 18px; height: 18px; flex: none; }
+.askentry:active { transform: scale(0.99); }
+@media (hover: hover) and (pointer: fine) {
+  .askentry:hover { border-color: var(--forest-green); box-shadow: var(--shadow-lift); }
+}
+
+.askbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 4px 4px 16px;
+  margin-bottom: 10px;
+  background: var(--card);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-pill);
+  transition: border-color 160ms var(--ease-out), box-shadow 160ms var(--ease-out);
+}
+.askbar:focus-within {
+  border-color: var(--forest-green);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--bright-green) 50%, transparent);
+}
+/* Typed selector on purpose: the generic input[type='text'] rule is defined
+   further down the file at equal specificity and would otherwise win, redrawing
+   its own border inside the pill. */
+.askbar input[type='text'] {
+  flex: 1;
+  min-width: 0;
+  padding: 12px 0;
+  border: 0;
+  background: none;
+  border-radius: 0;
+  font-size: 15px;
+  box-shadow: none;
+}
+.askbar input[type='text']:focus { border: 0; box-shadow: none; outline: none; }
+.asksend {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  flex: none;
+  border: 0;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--accent-ink);
+  transition: background-color 180ms var(--ease-out), transform 140ms var(--ease-out),
+    opacity 180ms var(--ease-out);
+}
+.asksend svg { width: 20px; height: 20px; }
+.asksend:active:not(:disabled) { transform: scale(0.92); }
+.asksend:disabled { opacity: 0.4; }
+
+/* Constant rotation is the one place linear is right. */
+.spinner {
+  width: 17px;
+  height: 17px;
+  border: 2px solid color-mix(in srgb, var(--forest-green) 28%, transparent);
+  border-top-color: var(--forest-green);
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.examples { display: grid; gap: 8px; }
+.examples button {
+  padding: 13px 16px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background: var(--card);
+  color: var(--text);
+  font-size: 14.5px;
+  text-align: left;
+  transition: background-color 160ms var(--ease-out), transform 140ms var(--ease-out),
+    border-color 160ms var(--ease-out);
+}
+.examples button:active { transform: scale(0.985); }
+@media (hover: hover) and (pointer: fine) {
+  .examples button:hover { border-color: var(--forest-green); }
+}
+
+.grouprow + .grouprow { margin-top: 14px; }
+.grouprow-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 14px;
+  margin-bottom: 6px;
+}
+.grouprow .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.grouprow .vl { font-weight: 600; white-space: nowrap; }
+.grouprow .ct { display: block; font-size: 12px; color: var(--muted); margin-top: 4px; }
+.groupbar { height: 8px; border-radius: var(--radius-pill); background: var(--neutral); overflow: hidden; }
+.groupbar > i {
+  display: block;
+  height: 100%;
+  border-radius: var(--radius-pill);
+  transition: width 320ms var(--ease-out);
+}
+
+/* ── More menu rows ──────────────────────────────────────────────────────── */
+.row.menurow { grid-template-columns: 1fr auto auto; }
+.row .chev { width: 18px; height: 18px; color: var(--muted); flex: none; }
+.badge.solo {
+  display: inline-block;
+  min-width: 20px;
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+  background: var(--negative);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  text-align: center;
+}
+
+/* ── Cards ───────────────────────────────────────────────────────────────── */
+.card {
+  background: var(--card);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+}
+.card + .card { margin-top: 12px; }
+.card > .card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  padding: 14px 16px 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.card > .card-body { padding: 16px; }
+
+/* ── The bright-green panel: the signature Wise moment ───────────────────── */
+/* Wise's own pairing — #9FE870 carries the panel, #163300 carries everything
+   on it. Fixed in both themes, because it is the brand, not a surface. */
+.brand {
+  background: var(--bright-green);
+  border-radius: var(--radius-lg);
+  padding: 22px 20px 20px;
+  color: var(--forest-green);
+  position: relative;
+  overflow: hidden;
+  box-shadow: var(--shadow-lift);
+}
+/* Deliberately no gradient, no bloom. #9FE870 is a Pantone-flat panel on Wise's
+   own site, and any wash across it immediately reads as a generic fintech
+   gradient card instead of the brand colour. */
+.brand > * { position: relative; }
+.brand .amount {
+  display: block;
+  font-family: var(--display);
+  /* Seven-figure totals on a narrow phone would otherwise run off the card. */
+  font-size: clamp(36px, 13vw, 52px);
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -0.045em;
+  color: var(--forest-green);
+}
+.brand .caption {
+  font-size: 13px;
+  font-weight: 500;
+  color: color-mix(in srgb, var(--forest-green) 72%, transparent);
+  margin: 0 0 8px;
+}
+.brand hr {
+  border: 0;
+  border-top: 1px solid color-mix(in srgb, var(--forest-green) 18%, transparent);
+  margin: 18px 0 14px;
+}
+/* Label over value, two columns. Side-by-side inline pairs re-wrap mid-phrase
+   on a 320px screen and read as four unrelated fragments. */
+.brand .foot {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
+  gap: 14px;
+}
+.brand .foot .k {
+  display: block;
+  font-size: 12px;
+  font-weight: 500;
+  color: color-mix(in srgb, var(--forest-green) 68%, transparent);
+  margin-bottom: 1px;
+}
+.brand .foot b {
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+/* ── Buttons — Wise pills ────────────────────────────────────────────────── */
 .btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 8px;
   width: 100%;
-  padding: 15px 18px;
+  padding: 16px 22px;
   border: 0;
-  border-radius: var(--radius);
-  background: var(--out);
-  color: var(--ink);
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  color: var(--accent-ink);
   font-size: 16px;
   font-weight: 600;
-  transition: opacity 0.15s, transform 0.1s;
+  letter-spacing: -0.01em;
+  /* 160ms press feedback: the interface confirming it heard you. */
+  transition: background-color 180ms var(--ease-out), transform 160ms var(--ease-out),
+    opacity 180ms var(--ease-out), box-shadow 180ms var(--ease-out);
 }
-.btn:active { transform: scale(0.985); }
-.btn:disabled { opacity: 0.5; }
+@media (hover: hover) and (pointer: fine) {
+  .btn:hover:not(:disabled) { background: var(--bright-green-hover); }
+  .btn.ghost:hover:not(:disabled) { background: var(--neutral); }
+}
+.btn:active:not(:disabled) { transform: scale(0.97); }
+.btn:disabled { opacity: 0.45; }
 .btn.ghost {
-  background: transparent;
+  background: var(--card);
   color: var(--text);
-  border: 1px solid var(--rule);
+  border: 1px solid var(--rule-strong);
   font-weight: 500;
 }
-.btn.small { width: auto; padding: 9px 14px; font-size: 14px; border-radius: 9px; }
+.btn.small { width: auto; padding: 11px 20px; font-size: 15px; }
 
 .linkish {
   background: none;
   border: 0;
-  padding: 0;
-  color: var(--muted);
+  /* A bare text link is a 19px tap target. This gets it to a thumb-sized one
+     without moving it visually. */
+  padding: 6px 2px;
+  margin: -6px 0;
+  color: var(--link);
   font-size: 14px;
+  font-weight: 500;
   text-decoration: underline;
+  text-decoration-thickness: 1.5px;
   text-underline-offset: 3px;
+  transition: opacity 160ms var(--ease-out);
+}
+.linkish:active { opacity: 0.6; }
+.linkish.quiet { color: var(--muted); font-weight: 400; }
+
+/* The Dark row. A .stat baseline-aligns, which dropped the switch below its
+   label; this is its own centre-aligned row with the label as the hit target. */
+.switchrow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 0;
+}
+.switchrow label { min-width: 0; cursor: pointer; }
+.switchrow .k { display: block; font-size: 15px; font-weight: 500; color: var(--text); }
+.switchrow .sub { display: block; font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+
+/* ── Budgets ─────────────────────────────────────────────────────────────── */
+.budgetline { margin-top: 4px; }
+.budgetline-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  font-size: 14px;
+  margin-bottom: 7px;
+}
+.budgetline-top b { font-weight: 700; }
+
+.budgetbar {
+  position: relative;
+  height: 9px;
+  border-radius: var(--radius-pill);
+  background: var(--neutral);
+  overflow: hidden;
+}
+.budgetbar > i {
+  display: block;
+  height: 100%;
+  border-radius: var(--radius-pill);
+  transition: width 340ms var(--ease-out);
+}
+/* Where an even spend would put you today. Without it the bar is a percentage,
+   not a target. */
+.budgetbar .pace {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--text);
+  opacity: 0.45;
 }
 
-/* ── Ledger rows: hairlines, no cards, no shadows ────────────────────────── */
+.budgetrow + .budgetrow { margin-top: 18px; }
+.budgetrow-top { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.budgetrow-top .nm {
+  flex: 1;
+  min-width: 0;
+  font-size: 14.5px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.budgetrow-foot {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 12.5px;
+  color: var(--muted);
+  margin-top: 6px;
+}
+.warn { color: var(--warning); }
+
+/* ── Merchant map rows ───────────────────────────────────────────────────── */
+.row.maprow { grid-template-columns: 38px minmax(0, 1fr) auto; }
+.row[data-busy='true'] { opacity: 0.5; pointer-events: none; }
+.maprow-edit { padding: 0 16px 12px 66px; }
+@media (max-width: 430px) {
+  .maprow-edit { padding-left: 16px; }
+  .maprow-edit .picker.compact { max-width: 100%; width: 100%; }
+}
+
+/* ── Destructive ─────────────────────────────────────────────────────────── */
+.danger { margin-top: 22px; padding-top: 16px; border-top: 1px solid var(--rule); text-align: center; }
+.danger p { font-size: 14px; margin: 0 0 12px; }
+.danger-actions { display: flex; justify-content: center; gap: 10px; }
+.danger-link { color: var(--negative); }
+.btn.destructive { background: var(--negative); color: #fff; }
+.btn.destructive:hover:not(:disabled) { background: var(--negative); opacity: 0.9; }
+
+/* The same two steps as .danger without the divider: these answer a close or a
+   save rather than ending the screen, so they sit inline where the tap was. */
+.confirmnote { margin: 0 0 16px; text-align: center; }
+.confirmnote p { font-size: 14px; margin: 0 0 12px; }
+
+/* Two fields on one line, stacked below the width where that stops working. */
+.pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 360px) {
+  .pair { grid-template-columns: 1fr; gap: 0; }
+}
+
+/* Switch. The knob rides on a transform so the travel stays on the GPU. */
+.switch {
+  width: 48px;
+  height: 28px;
+  flex: none;
+  padding: 3px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--rule-strong);
+  transition: background-color 200ms var(--ease-out);
+}
+.switch > i {
+  display: block;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(14, 15, 12, 0.28);
+  transition: transform 220ms var(--ease-out);
+}
+.switch[aria-checked='true'] { background: var(--forest-green); }
+.switch[aria-checked='true'] > i { transform: translateX(20px); background: var(--bright-green); }
+
+/* ── Drop zone ───────────────────────────────────────────────────────────── */
+.drop {
+  display: block;
+  width: 100%;
+  text-align: center;
+  padding: 26px 20px;
+  background: var(--card);
+  border: 1.5px dashed var(--rule-strong);
+  border-radius: var(--radius-lg);
+  color: var(--text);
+  transition: background-color 200ms var(--ease-out), border-color 200ms var(--ease-out),
+    transform 200ms var(--ease-out), box-shadow 200ms var(--ease-out);
+}
+@media (hover: hover) and (pointer: fine) {
+  .drop:hover { border-color: var(--forest-green); box-shadow: var(--shadow-card); }
+}
+.drop:active { transform: scale(0.99); }
+/* Dragging over is the one place a lift reads as "yes, let go here". */
+.drop.over {
+  border-color: var(--forest-green);
+  background: var(--light-green);
+  transform: scale(1.012);
+  box-shadow: var(--shadow-lift);
+}
+.drop .headline {
+  font-family: var(--display);
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.drop .sub { color: var(--muted); font-size: 13px; margin-top: 5px; }
+.drop .kbd {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 5px;
+  border: 1px solid var(--rule-strong);
+  background: var(--sunken);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* ── Ledger rows, now inside cards ───────────────────────────────────────── */
 .ledger { margin: 0; padding: 0; list-style: none; }
 .row {
   display: grid;
-  grid-template-columns: 8px 1fr auto;
-  align-items: baseline;
-  gap: 10px;
-  padding: 13px 0;
-  border-bottom: 1px solid var(--rule);
-  text-align: left;
+  grid-template-columns: 38px 1fr auto;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
   width: 100%;
+  text-align: left;
   background: none;
-  border-left: 0;
-  border-right: 0;
-  border-top: 0;
+  border: 0;
+  border-radius: 0;
+  color: inherit;
+  transition: background-color 160ms var(--ease-out), transform 140ms var(--ease-out);
 }
-.row .dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  align-self: center;
-  background: var(--muted);
+.ledger > li + li .row { box-shadow: inset 0 1px 0 var(--rule); }
+@media (hover: hover) and (pointer: fine) {
+  button.row:hover { background: var(--sunken); }
 }
+button.row:active { transform: scale(0.985); }
+
+/* Icon tile. The category colour at low alpha, its glyph at full strength. */
+.tile {
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  flex: none;
+}
+.tile svg { width: 19px; height: 19px; display: block; }
+
 .row .who { min-width: 0; }
-/* .who's children are spans in some screens, divs in others — force the stack
-   either way, or the timestamp runs into the merchant name. */
 .row .name,
 .row .meta { display: block; }
 .row .name {
   font-size: 15px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.row .meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
-.row .amt { font-size: 15px; text-align: right; white-space: nowrap; }
-/* A select sitting in the amount column sizes to its content, not the row. */
-.row select { width: auto; min-width: 132px; padding: 8px 10px; font-size: 13px; }
+/* The meta line clips like the name does. Left to wrap it turns a 60px row
+   into a 90px one the moment a merchant name is long. */
+.row .meta {
+  font-size: 12.5px;
+  color: var(--muted);
+  margin-top: 1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.row .amt { font-size: 15.5px; font-weight: 600; text-align: right; white-space: nowrap; }
+.row select { width: auto; min-width: 148px; padding: 9px 34px 9px 12px; font-size: 13px; }
+/* Below this the select was eating the merchant name it is meant to describe. */
+@media (max-width: 400px) {
+  .row select { min-width: 116px; padding: 9px 30px 9px 10px; font-size: 12.5px; }
+  .row:has(select)::after { right: 24px; }
+}
 
 .row.flagged .name::after {
-  content: '·';
-  color: var(--alert);
-  margin-left: 6px;
-  font-weight: 700;
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--warning);
+  margin-left: 7px;
+  vertical-align: 1px;
 }
 
-.daygroup { margin-top: 22px; }
-.daygroup > .head {
-  display: flex;
-  justify-content: space-between;
+/* Accordion. grid-template-rows 0fr→1fr is the only honest way to transition
+   to auto height; it is one element, so the layout cost stays bounded. */
+.reveal {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 260ms var(--ease-out), opacity 200ms var(--ease-out);
+  opacity: 0;
+}
+.reveal > div { overflow: hidden; min-height: 0; }
+.reveal[data-open='true'] { grid-template-rows: 1fr; opacity: 1; }
+
+/* ── Donut ───────────────────────────────────────────────────────────────── */
+.donut { position: relative; }
+.donut .centre {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  text-align: center;
+  pointer-events: none;
+}
+.donut .centre .k {
   font-size: 12px;
   color: var(--muted);
-  padding-bottom: 6px;
+  max-width: 118px;
+  margin: 0 auto 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.donut .centre .v {
+  font-family: var(--display);
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.035em;
+}
+/* The centre label swaps as you tap segments. A crossfade between two texts
+   reads as two objects overlapping — blur bridges them into one change. */
+.donut .centre .swap {
+  transition: opacity 180ms var(--ease-out), filter 180ms var(--ease-out);
+}
+.donut .centre .swap[data-swapping='true'] { opacity: 0.35; filter: blur(3px); }
+
+.legend { display: grid; gap: 2px; }
+.legend button {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 9px 10px;
+  background: none;
+  border: 0;
+  border-radius: var(--radius-sm);
+  text-align: left;
+  color: inherit;
+  transition: background-color 160ms var(--ease-out), transform 140ms var(--ease-out);
+}
+.legend button:active { transform: scale(0.985); }
+.legend button[data-active='true'] { background: var(--neutral); }
+.legend .tile { width: 30px; height: 30px; border-radius: 10px; }
+.legend .tile svg { width: 16px; height: 16px; }
+.legend .nm { font-size: 14px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.legend .pc { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.legend .vl { font-size: 14px; font-weight: 600; }
+/* On a narrow phone the percentage is the first thing worth losing — the ring
+   already shows proportion, the rupee figure does not exist anywhere else. */
+@media (max-width: 359px) {
+  .legend .pc { display: none; }
 }
 
-/* ── Day strip: the signature element ────────────────────────────────────── */
+/* ── Day strip ───────────────────────────────────────────────────────────── */
 .strip {
   display: flex;
   align-items: flex-end;
   gap: 3px;
-  height: 46px;
-  margin: 4px 0 10px;
+  height: 56px;
 }
 .strip .bar {
   flex: 1;
-  min-height: 2px;
-  border-radius: 1px;
-  background: var(--rule);
-  transition: background 0.15s;
+  min-height: 3px;
+  border-radius: 3px;
+  background: var(--neutral);
+  transform-origin: bottom;
+  transition: background-color 160ms var(--ease-out);
 }
-.strip .bar.has { background: color-mix(in srgb, var(--out) 55%, transparent); }
-.strip .bar.today { background: var(--out); }
-.strip .bar.sel { background: var(--text); }
-.strip .bar.weekend { opacity: 0.72; }
+.strip .bar.has { background: color-mix(in srgb, var(--forest-green) 42%, transparent); }
+.strip .bar.today { background: var(--forest-green); }
+.strip .bar.weekend { opacity: 0.66; }
 .striplabels {
   display: flex;
   justify-content: space-between;
   font-size: 11px;
   color: var(--muted);
+  margin-top: 6px;
 }
 
-/* ── Cards / panels (used sparingly) ─────────────────────────────────────── */
+/* ── Panels / stats ──────────────────────────────────────────────────────── */
 .panel {
-  background: var(--surface);
+  background: var(--card);
+  border: 1px solid var(--rule);
   border-radius: var(--radius);
-  padding: 16px;
+  box-shadow: var(--shadow-card);
+  padding: 18px;
   margin-bottom: 12px;
 }
 .stat { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
 .stat + .stat { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--rule); }
-.stat .k { color: var(--muted); font-size: 13px; }
-.stat .v { font-size: 17px; }
+.stat .k { color: var(--muted); font-size: 13px; flex: none; }
+/* An email address is one unbreakable token; without this it pushes the row
+   wider than the screen and the whole page gains a horizontal scrollbar. */
+.stat .v {
+  font-size: 17px;
+  font-weight: 500;
+  min-width: 0;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.tiles .card { margin: 0; padding: 14px 15px; }
+.tiles .k { font-size: 12.5px; color: var(--muted); }
+.tiles .v {
+  font-family: var(--display);
+  font-size: clamp(18px, 5.6vw, 22px);
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  margin-top: 3px;
+  white-space: nowrap;
+}
+
+/* "AI noticed" — a finding, not a stat. */
+.noticed {
+  display: grid;
+  grid-template-columns: 3px 1fr;
+  gap: 14px;
+  background: var(--card);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+  padding: 0;
+  overflow: hidden;
+}
+.noticed::before { content: ''; background: var(--accent); }
+.noticed .body { padding: 14px 16px 14px 0; }
+.noticed .k {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 5px;
+}
+.noticed p {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.45;
+  letter-spacing: -0.01em;
+  text-wrap: pretty;
+}
+.noticed + .noticed { margin-top: 12px; }
+
+/* Result of a read: "I found 4 transactions" */
+.found {
+  background: var(--card);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lift);
+  overflow: hidden;
+  opacity: 1;
+  transform: none;
+  transition: opacity 260ms var(--ease-out), transform 260ms var(--ease-out);
+}
+/* Nothing in the real world appears from nothing — 0.96, never 0. */
+@starting-style {
+  .found { opacity: 0; transform: translateY(10px) scale(0.96); }
+}
+.found > .head { padding: 16px 16px 2px; }
+.found .title {
+  font-family: var(--display);
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.found .sub { font-size: 13px; color: var(--muted); margin: 2px 0 8px; }
+
+/* ── Bottom sheet ────────────────────────────────────────────────────────── */
+.sheet-root { position: fixed; inset: 0; z-index: 60; }
+.sheet-scrim {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  border: 0;
+  padding: 0;
+  background: rgba(14, 15, 12, 0.42);
+  opacity: 0;
+  transition: opacity 200ms var(--ease-out);
+}
+.sheet-root[data-open='true'] .sheet-scrim { opacity: 1; }
+
+.sheet {
+  position: absolute;
+  left: 50%;
+  bottom: 0;
+  width: 100%;
+  max-width: 540px;
+  max-height: 86vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--screen);
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  outline: none;
+  /* translateY(100%) is the element's own height, so this works whatever ends
+     up inside it. Exit runs shorter than enter — see Sheet.jsx. */
+  transform: translateX(-50%) translateY(100%);
+  transition: transform 280ms var(--ease-out);
+}
+.sheet-root[data-open='true'] .sheet { transform: translateX(-50%) translateY(0); }
+@media (prefers-reduced-motion: reduce) {
+  .sheet { transform: translateX(-50%); }
+}
+
+.sheet-grip {
+  width: 38px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--rule-strong);
+  margin: 10px auto 0;
+  flex: none;
+}
+.sheet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px 10px 20px;
+  font-family: var(--display);
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  flex: none;
+}
+.sheet-x {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--neutral);
+  color: var(--text);
+  transition: background-color 160ms var(--ease-out), transform 140ms var(--ease-out);
+}
+.sheet-x svg { width: 16px; height: 16px; }
+.sheet-x:active { transform: scale(0.9); }
+.sheet-body {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 4px 16px calc(20px + env(safe-area-inset-bottom));
+}
+
+/* ── Category picker ─────────────────────────────────────────────────────── */
+.picker {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  width: 100%;
+  padding: 9px 12px 9px 9px;
+  background: var(--card);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-sm);
+  color: inherit;
+  text-align: left;
+  transition: border-color 160ms var(--ease-out), transform 140ms var(--ease-out),
+    background-color 160ms var(--ease-out);
+}
+.picker:active:not(:disabled) { transform: scale(0.99); }
+.picker:disabled { opacity: 0.5; }
+@media (hover: hover) and (pointer: fine) {
+  .picker:hover:not(:disabled) { border-color: var(--forest-green); }
+}
+.picker-label {
+  flex: 1;
+  min-width: 0;
+  font-size: 15px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.picker-chev { width: 17px; height: 17px; flex: none; color: var(--muted); }
+.picker.compact {
+  width: auto;
+  max-width: 150px;
+  padding: 6px 9px 6px 6px;
+  border-radius: var(--radius-pill);
+}
+.picker.compact .picker-label { font-size: 13.5px; }
+
+.tile.sm { width: 32px; height: 32px; border-radius: 9px; }
+.tile.sm svg { width: 16px; height: 16px; }
+.tile.empty { background: var(--neutral); border: 1px dashed var(--rule-strong); }
+
+.catgrid { display: grid; gap: 2px; }
+.catcell { position: relative; }
+.catcell > button {
+  display: grid;
+  grid-template-columns: 38px 1fr auto;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: inherit;
+  text-align: left;
+  font-size: 15px;
+  font-weight: 500;
+  transition: background-color 160ms var(--ease-out), transform 140ms var(--ease-out);
+}
+.catcell > button:active { transform: scale(0.985); }
+.catcell > button[data-selected='true'] { background: var(--neutral); font-weight: 600; }
+.catcell .tick { width: 19px; height: 19px; color: var(--forest-green); }
+:root[data-theme='dark'] .catcell .tick { color: var(--bright-green); }
+/* 40px, not the 30px this used to be: it is the one destructive control in the
+   picker and it sits a thumb-width from the row that selects a category. */
+.catdel {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--neutral);
+  color: var(--muted);
+  transition: color 160ms var(--ease-out), background-color 160ms var(--ease-out);
+}
+.catdel svg { width: 15px; height: 15px; }
+.catdel:active { color: var(--negative); }
+/* The confirm takes over the row it belongs to, so it keeps the row's padding
+   instead of .confirmnote's bottom margin. */
+.catcell .confirmnote { margin: 0; padding: 8px 10px 10px; }
+
+.newcat { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--rule); }
+.field-label { display: block; font-size: 13px; font-weight: 500; color: var(--muted); margin-bottom: 8px; }
+.swatches { display: grid; grid-template-columns: repeat(8, 1fr); gap: 8px; }
+.swatches button {
+  aspect-ratio: 1;
+  border: 0;
+  border-radius: 10px;
+  outline: 2px solid transparent;
+  outline-offset: 2px;
+  transition: outline-color 160ms var(--ease-out), transform 140ms var(--ease-out);
+}
+.swatches button:active { transform: scale(0.9); }
+.swatches button[data-selected='true'] { outline-color: var(--forest-green); }
+:root[data-theme='dark'] .swatches button[data-selected='true'] { outline-color: var(--bright-green); }
+.newcat-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
+
+/* Teach: the picker replaces the amount column, so the row loses its tile. */
+.row.teachrow { grid-template-columns: minmax(0, 1fr) auto; }
+/* Side by side, a 150px picker and a merchant name both lose. Under this the
+   picker drops to its own line at full width and the name gets the row. */
+@media (max-width: 430px) {
+  .row.teachrow { grid-template-columns: 1fr; gap: 10px; }
+  .row.teachrow .picker.compact { max-width: 100%; width: 100%; }
+}
 
 /* ── Forms ───────────────────────────────────────────────────────────────── */
-.field { display: block; margin-bottom: 14px; }
-.field > span { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+.field { display: block; margin-bottom: 16px; position: relative; }
+.field > span { display: block; font-size: 13px; font-weight: 500; color: var(--muted); margin-bottom: 6px; }
 input[type='text'],
 input[type='email'],
 input[type='number'],
@@ -278,34 +1334,87 @@ input[type='time'],
 select,
 textarea {
   width: 100%;
-  padding: 12px 13px;
-  background: var(--surface);
-  border: 1px solid var(--rule);
-  border-radius: 10px;
+  padding: 14px 15px;
+  background: var(--card);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-sm);
   outline: none;
+  transition: border-color 160ms var(--ease-out), box-shadow 160ms var(--ease-out);
 }
-input:focus, select:focus, textarea:focus { border-color: var(--muted); }
-select { appearance: none; background-image: none; }
+input:focus, select:focus, textarea:focus {
+  border-color: var(--forest-green);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--bright-green) 50%, transparent);
+}
+:root[data-theme='dark'] input:focus,
+:root[data-theme='dark'] select:focus,
+:root[data-theme='dark'] textarea:focus { border-color: var(--bright-green); }
+select { appearance: none; background-image: none; padding-right: 36px; }
+
+/* One inline chevron, no icon dependency. */
+.field:has(select)::after,
+.row:has(select)::after {
+  content: '';
+  position: absolute;
+  right: 15px;
+  bottom: 21px;
+  width: 8px;
+  height: 8px;
+  border-right: 1.6px solid var(--muted);
+  border-bottom: 1.6px solid var(--muted);
+  transform: rotate(45deg);
+  pointer-events: none;
+}
+.row { position: relative; }
+.row:has(select)::after { bottom: 50%; margin-bottom: -3px; right: 28px; }
 
 /* ── Progress ────────────────────────────────────────────────────────────── */
-.progress { height: 3px; background: var(--rule); border-radius: 2px; overflow: hidden; }
-.progress > i { display: block; height: 100%; background: var(--out); transition: width 0.2s; }
+.progress {
+  height: 4px;
+  background: var(--neutral);
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+  margin-top: 14px;
+}
+/* Constant-rate motion is the one place linear is correct. */
+.progress > i {
+  display: block;
+  height: 100%;
+  background: var(--forest-green);
+  border-radius: var(--radius-pill);
+  transition: width 240ms linear;
+}
 
-.empty { color: var(--muted); padding: 34px 0; text-align: center; font-size: 15px; }
+.empty { color: var(--muted); padding: 40px 0; text-align: center; font-size: 15px; }
 
+/* Toasts are added rapidly, so this is a transition — a keyframe would restart
+   from zero instead of retargeting when a second one lands. */
 .toast {
   position: fixed;
   left: 50%;
-  bottom: calc(78px + env(safe-area-inset-bottom));
-  transform: translateX(-50%);
-  background: var(--surface-2);
-  border: 1px solid var(--rule);
-  border-radius: 10px;
-  padding: 11px 16px;
+  bottom: calc(96px + env(safe-area-inset-bottom));
+  background: var(--forest-green);
+  color: #e8ebe6;
+  border-radius: var(--radius-pill);
+  padding: 12px 20px;
   font-size: 14px;
+  font-weight: 500;
   max-width: 90vw;
   z-index: 30;
-  animation: rise 0.2s ease-out;
+  box-shadow: var(--shadow-lift);
+  opacity: 1;
+  transform: translateX(-50%) translateY(0) scale(1);
+  transition: opacity 260ms var(--ease-out), transform 260ms var(--ease-out);
+}
+@starting-style {
+  .toast { opacity: 0; transform: translateX(-50%) translateY(100%) scale(0.96); }
 }
 
 .hidden-file { display: none; }
+
+details > summary { cursor: pointer; }
+code {
+  font-size: 0.9em;
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--neutral);
+}
