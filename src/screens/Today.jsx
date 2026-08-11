@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { readBatch, preload } from '../lib/ocr'
-import { parse } from '../lib/parse'
+import { parseScreenshot } from '../lib/parse'
 import { categoriseBatch, persistAILearnings, learn } from '../lib/categorise'
 import { saveTransactions, listTransactions, updateTransaction } from '../lib/db'
 import { money, today, dayLabel, timeLabel, spendTotal } from '../lib/format'
@@ -44,7 +44,8 @@ export default function Today({ onChange, reviewCount, goReview }) {
       )
       setBusy({ done: files.length, total: files.length, stage: 'sorting' })
 
-      const parsed = texts.map((t) => parse(t.text))
+      // One history screenshot carries ~7 transactions, a receipt carries one.
+      const parsed = texts.flatMap((t) => parseScreenshot(t.text))
       const unreadable = parsed.filter((p) => !p.amount || !p.txn_date).length
 
       const categorised = await categoriseBatch(parsed)

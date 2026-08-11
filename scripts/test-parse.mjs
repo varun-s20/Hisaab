@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict'
 import {
   parse, toNumber, extractDate, extractDirection, extractPayee,
-  isPersonal, detectApp, synthRef,
+  isPersonal, detectApp, synthRef, parseScreenshot,
 } from '../src/lib/parse.js'
 
 const NOW = new Date(2026, 7, 11) // 11 Aug 2026
@@ -80,6 +80,108 @@ check('synthetic ref is stable for the same payment', () => {
   const a = { txn_date: '2026-08-11', amount: 450, payee_raw: 'Chai Point' }
   assert.equal(synthRef(a), synthRef({ ...a }))
   assert.notEqual(synthRef(a), synthRef({ ...a, amount: 451 }))
+})
+
+// ── History-list screenshots ─────────────────────────────────────────────────
+// Verbatim OCR from a real Paytm Payment History screenshot. Do not tidy it —
+// the mangling is the point.
+const HISTORY = `1:55 CIEE ul €
+<— Balance & History
+Total Spent
+August 2026 Refresh
+IC Indian Clearing Corporation Ltd -%1,000
+~~ - Automatic Payment
+Paid Today, 07:18 AM From A
+i Financial
+& Kunafa Mahal -394
+Paid Yesterday, 11:01 PM From A
+@ Food
+SB Sachin Bhawan +3340
+Received Yesterday, 09:57 PM In A
+3 Money Received
+MA Mohammad Amaan -%1,680
+Sent Yesterday, 09:55 PM From A
+3 Money Transfer
+a Ms Shyam Departmental Store -%20
+Paid on 09 Aug, 10:11 PM From 4
+©. Groceries
+paytm | = LIF`
+
+check('one history screenshot yields many transactions', () => {
+  const rows = parseScreenshot(HISTORY, NOW)
+  assert.equal(rows.length, 5)
+})
+
+check('the rupee sign OCRs as 3, % or ¥ and is not a digit', () => {
+  const [ic, kunafa, sachin, amaan] = parseScreenshot(HISTORY, NOW)
+  assert.equal(ic.amount, 1000) // -%1,000
+  assert.equal(kunafa.amount, 94) // -394 is ₹94, not ₹394
+  assert.equal(sachin.amount, 340) // +3340 is ₹340
+  assert.equal(amaan.amount, 1680)
+})
+
+check('relative dates and times inside a list', () => {
+  const [ic, kunafa] = parseScreenshot(HISTORY, NOW)
+  assert.equal(ic.txn_date, '2026-08-11')
+  assert.equal(ic.txn_time, '07:18:00')
+  assert.equal(kunafa.txn_date, '2026-08-10')
+  assert.equal(kunafa.txn_time, '23:01:00')
+})
+
+check('year comes from the screen header, not the current date', () => {
+  const [, , , , store] = parseScreenshot(HISTORY, NOW)
+  assert.equal(store.txn_date, '2026-08-09') // "on 09 Aug", no year in the row
+})
+
+check('avatar initials are stripped from merchant names', () => {
+  const rows = parseScreenshot(HISTORY, NOW)
+  assert.deepEqual(
+    rows.map((r) => r.payee_raw),
+    ['Indian Clearing Corporation Ltd', 'Kunafa Mahal', 'Sachin Bhawan',
+     'Mohammad Amaan', 'Ms Shyam Departmental Store'],
+  )
+})
+
+check("the app's own category tag survives its icon glyph", () => {
+  const rows = parseScreenshot(HISTORY, NOW)
+  assert.deepEqual(
+    rows.map((r) => r.category_hint),
+    ['Transfers', 'Food & Dining', 'Transfers', 'Transfers', 'Groceries'],
+  )
+})
+
+check('direction from the verb and the sign', () => {
+  const rows = parseScreenshot(HISTORY, NOW)
+  assert.deepEqual(
+    rows.map((r) => r.direction),
+    ['debit', 'debit', 'credit', 'debit', 'debit'],
+  )
+})
+
+check('a row whose amount the OCR lost is flagged, not dropped', () => {
+  const rows = parseScreenshot(
+    ['Total Spent', 'August 2026',
+     'ov Indian Clearing Corporation Ltd -3',
+     '~~ - Automatic Payment of', '100000 Setup',
+     'Paid on 04 Aug, 03:05 PM From A', 'if Financial'].join('\n'),
+    NOW,
+  )
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].amount, null)
+  assert.equal(rows[0].payee_raw, 'Indian Clearing Corporation Ltd')
+  assert.equal(rows[0].needs_review, true)
+})
+
+check('two identical amounts on one day stay two rows', () => {
+  const a = { txn_date: '2026-08-01', txn_time: '20:42:00', amount: 50, payee_raw: 'Swiggy Diners' }
+  const b = { ...a, txn_time: '22:26:00' }
+  assert.notEqual(synthRef(a), synthRef(b))
+})
+
+check('a single receipt still parses as one row', () => {
+  const rows = parseScreenshot('₹450\nPaid to\nSwiggy\nGoogle Pay\n11 Aug 2026', NOW)
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].amount, 450)
 })
 
 // The statement importer ships its own checks; run them from the same command.

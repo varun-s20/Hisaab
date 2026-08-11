@@ -201,9 +201,12 @@ export function isPersonal(payee) {
 // No ref on the screenshot? Synthesise a stable one from date+amount+payee so
 // the unique index still catches a re-upload. Prefixed so it's obviously
 // derived and can be found later.
-export function synthRef({ txn_date, amount, payee_raw }) {
+// History-list screenshots carry no reference at all, so the time is part of
+// the key — without it, two ₹50 Swiggy orders on the same day collapse into one.
+export function synthRef({ txn_date, txn_time, amount, payee_raw }) {
   const slug = (payee_raw ?? 'unknown').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 12)
-  return `syn_${txn_date ?? 'nodate'}_${amount ?? 0}_${slug}`
+  const t = txn_time ? txn_time.slice(0, 5).replace(':', '') : ''
+  return `syn_${txn_date ?? 'nodate'}${t ? `T${t}` : ''}_${amount ?? 0}_${slug}`
 }
 
 // ── The parser ───────────────────────────────────────────────────────────────
@@ -245,4 +248,197 @@ export function parse(text, now = new Date()) {
     needs_review: confidence < 0.7,
     raw_text: text,
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HISTORY-LIST SCREENSHOTS
+//
+// Written against real OCR output (screenshots/ocr-output.txt, 11 Aug 2026).
+// The real screenshots are not single-payment receipts — they're the Paytm
+// "Payment History" screen, roughly seven transactions per shot:
+//
+//     & Kunafa Mahal -394              ← name + amount, ₹ misread as 3/%/¥
+//     Paid Yesterday, 11:01 PM From A  ← verb, date, time, account
+//     @ Food                           ← Paytm's own category
+//
+// That's strictly better than receipts: one tap yields seven rows instead of
+// one, the list contains transactions you never thought to screenshot, and
+// Paytm hands over a category for free — which skips the AI entirely for most
+// rows. Receipts still work; `parseScreenshot` falls back to `parse` when it
+// finds no list anchors.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const LIST_HEADER = /payment history|balance\s?&?\s?history|total spent/i
+
+// "Paid Today, 07:18 AM", "Sent on 04 Aug, 01:31 PM", "Received Yesterday, ..."
+const ANCHOR =
+  /^[-\s]*(Paid|Sent|Received)\s+(?:(Today|Yesterday)|on\s+(\d{1,2})\s+([A-Za-z]{3,9}))\s*,?\s*(\d{1,2}:\d{2})?\s*(AM|PM)?/i
+
+// The rupee sign lands as %, 3, ¥, ? or © depending on the render. It is always
+// exactly one glyph between the sign and the digits, which is what makes this
+// safe: `-394` is ₹94, and `-31,883.64` is ₹1,883.64, not thirty-one thousand.
+const LIST_AMOUNT = /([-+])\s*[%3¥₹?2SZ*©$]\s?([\d][\d,]*(?:\.\d{1,2})?)\s*$/
+
+// Paytm's own labels. Local, free, and better than anything an LLM would guess.
+const PAYTM_CATEGORY = {
+  food: 'Food & Dining',
+  groceries: 'Groceries',
+  taxi: 'Transport',
+  travel: 'Transport',
+  fuel: 'Transport',
+  entertainment: 'Entertainment',
+  shopping: 'Shopping',
+  medical: 'Health',
+  health: 'Health',
+  'bill payments': 'Bills & Utilities',
+  recharge: 'Bills & Utilities',
+  utilities: 'Bills & Utilities',
+  rent: 'Rent',
+  education: 'Education',
+  'personal care': 'Personal Care',
+  'money transfer': 'Transfers',
+  'money received': 'Transfers',
+  financial: 'Transfers',
+  investment: 'Transfers',
+  insurance: 'Transfers',
+  miscellaneous: 'Other',
+  others: 'Other',
+  other: 'Other',
+}
+
+const MONTH_HEADER =
+  /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+(20\d{2})\b/i
+
+/** Strip the avatar glyph or initials Paytm prefixes to every row. */
+function stripAvatar(name) {
+  return name
+    .replace(/^[^A-Za-z0-9]+/, '')
+    .replace(/^[A-Za-z]{1,2}\s+(?=[A-Z0-9])/, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+}
+
+/**
+ * The category line arrives with an icon glyph in front, and the glyph OCRs as
+ * anything: "@ Food", "3 Money Transfer", "[i Shopping", "«=, Taxi".
+ * Strip everything ahead of the label, including a stray one- or two-letter
+ * fragment of the icon.
+ */
+function categoryLabel(line) {
+  return String(line ?? '')
+    .replace(/^[^A-Za-z]+/, '')
+    .replace(/^[A-Za-z]{1,2}\s+(?=[A-Z])/, '')
+    .trim()
+    .toLowerCase()
+}
+
+// Wrapped mandate copy, not part of the merchant name.
+const NOT_NAME = /^(?:[-~\s]*automatic payment|payment(?:\s+of\b|$)|setup$|\d[\d,]*\s*setup)/i
+
+// A trailing sign-and-glyph with no digits: the amount the OCR lost.
+const BROKEN_AMOUNT = /[-+]\s*[%3¥₹?2SZ*©$]?\s*$/
+
+export function parseHistory(text, now = new Date()) {
+  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean)
+  const headerYear = Number(text.match(MONTH_HEADER)?.[2]) || null
+
+  const rows = []
+  for (let i = 0; i < lines.length; i++) {
+    const a = lines[i].match(ANCHOR)
+    if (!a) continue
+
+    // Walk back to the line carrying the amount — that's the merchant line.
+    let head = -1
+    let fallbackHead = -1
+    for (let j = i - 1; j >= 0 && j >= i - 4; j--) {
+      if (ANCHOR.test(lines[j])) break // ran into the previous transaction
+      if (LIST_AMOUNT.test(lines[j])) {
+        head = j
+        break
+      }
+      // The previous transaction's category label — stop, or its name bleeds
+      // into this row.
+      if (PAYTM_CATEGORY[categoryLabel(lines[j])]) break
+      if (fallbackHead === -1 && !NOT_NAME.test(lines[j])) fallbackHead = j
+    }
+
+    // No amount on any line above? The OCR mangled it — a mandate line reading
+    // "-3" with the digits lost. Emit the row anyway with a low confidence so
+    // it surfaces in review. Dropping it silently is how a ledger goes wrong
+    // without anyone noticing.
+    if (head === -1 && fallbackHead === -1) continue
+
+    const m = head === -1 ? null : lines[head].match(LIST_AMOUNT)
+    const amount = m ? toNumber(m[2]) : null
+    const signCredit = m?.[1] === '+'
+
+    const nameStart = head === -1 ? fallbackHead : head
+    let payee_raw = stripAvatar(
+      m ? lines[head].slice(0, m.index) : lines[fallbackHead].replace(BROKEN_AMOUNT, ''),
+    )
+    for (let j = nameStart + 1; j < i; j++) {
+      if (NOT_NAME.test(lines[j])) continue
+      const extra = stripAvatar(lines[j])
+      if (extra.length >= 2) payee_raw = `${payee_raw} ${extra}`.trim()
+    }
+
+    const verb = a[1].toLowerCase()
+    const direction = verb === 'received' || signCredit ? 'credit' : 'debit'
+
+    const txn_date = a[2]
+      ? extractDate(a[2], now)
+      : listDate(Number(a[3]), a[4], headerYear, now)
+    const txn_time = a[5] ? extractTime(`${a[5]} ${a[6] ?? ''}`) : null
+
+    // Paytm's label sits on the line after the date, prefixed with an icon.
+    const hint = PAYTM_CATEGORY[categoryLabel(lines[i + 1])] ?? null
+
+    let confidence = 1.0
+    if (!amount) confidence -= 0.6
+    if (!payee_raw) confidence -= 0.3
+    if (!txn_date) confidence -= 0.3
+    confidence = Math.max(0, Math.round(confidence * 100) / 100)
+
+    rows.push({
+      app: 'paytm',
+      amount,
+      direction,
+      payee_raw: payee_raw || null,
+      txn_date,
+      txn_time,
+      txn_ref: null, // the list view shows none; db.js synthesises one
+      category_hint: hint,
+      method: 'paytm',
+      source: 'screenshot',
+      confidence,
+      needs_review: confidence < 0.7,
+      raw_text: lines.slice(nameStart, i + 2).join('\n'),
+    })
+  }
+  return rows
+}
+
+/** "09 Aug" with no year — take it from the screen header, or infer. */
+function listDate(day, monthName, headerYear, now) {
+  const mon = MONTHS[monthName.slice(0, 3).toLowerCase()]
+  if (mon === undefined) return null
+  let year = headerYear ?? now.getFullYear()
+  let d = new Date(year, mon, day)
+  // A list dated after today means the year rolled over (Dec rows under a
+  // January header), not a payment from the future.
+  if (d.getTime() > now.getTime() + 86400000) d = new Date(year - 1, mon, day)
+  if (d.getDate() !== day || d.getMonth() !== mon) return null
+  return iso(d)
+}
+
+/**
+ * One screenshot in, one or more transactions out.
+ * History screens yield many rows; a single receipt yields one.
+ */
+export function parseScreenshot(text, now = new Date()) {
+  if (LIST_HEADER.test(text)) {
+    const rows = parseHistory(text, now)
+    if (rows.length > 0) return rows
+  }
+  return [parse(text, now)]
 }

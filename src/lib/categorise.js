@@ -3,10 +3,19 @@ import { isPersonal } from './parse'
 import { normalise, seedLookup, TYPE_FOR_CATEGORY } from './seeds'
 
 // The cascade, in order — stop at the first hit:
-//   1. personal check   (local regex, no network, ever)
-//   2. merchant map     (Supabase, cached in memory)
-//   3. seed rules       (hardcoded brands)
-//   4. Gemini           (one batched call, merchant strings only)
+//   1. merchant map      (Supabase, cached; a correction the user made outranks all)
+//   2. the app's own tag (Paytm labels every row: Food, Money Transfer, …)
+//   3. personal check    (local regex — a bare name or UPI handle is a transfer)
+//   4. seed rules        (hardcoded brands)
+//   5. Gemini            (one batched call, merchant strings only)
+//
+// The app's own tag sits above the personal check on purpose. Half of Indian
+// merchants ARE people — the chaiwala, the sabziwala, the man who fixes your
+// bike. Paytm already distinguishes "Ramnarayan Ahir · Food" from
+// "Rushikesh Kedar · Money Transfer", and demoting a real food payment to a
+// transfer would quietly delete it from every spending total.
+//
+// Personal payees still never reach the API, whatever tier they resolve at.
 
 let mapCache = null
 
@@ -25,9 +34,10 @@ export function clearMapCache() {
   mapCache = null
 }
 
-function typeFor(category, direction, personal) {
-  if (personal) return direction === 'credit' ? 'repaid' : 'transfer'
-  if (direction === 'credit') return category === 'Transfers' ? 'transfer' : 'income'
+function typeFor(category, direction) {
+  // Transfers are money moving, never spending — in either direction.
+  if (category === 'Transfers') return direction === 'credit' ? 'repaid' : 'transfer'
+  if (direction === 'credit') return 'income'
   return TYPE_FOR_CATEGORY[category] ?? 'expense'
 }
 
@@ -48,13 +58,15 @@ export async function categoriseBatch(txns) {
     let category = null
     let payee_clean = t.payee_raw
 
-    if (personal) {
-      // Your friends' names stay on your phone. No lookup, no network.
-      category = 'Transfers'
-    } else if (map.has(key)) {
+    if (map.has(key)) {
       const hit = map.get(key)
       category = hit.category
       payee_clean = hit.payee_clean
+    } else if (t.category_hint) {
+      category = t.category_hint
+    } else if (personal) {
+      // Your friends' names stay on your phone. No lookup, no network.
+      category = 'Transfers'
     } else {
       const seed = seedLookup(t.payee_raw)
       if (seed) category = seed
@@ -82,7 +94,7 @@ export async function categoriseBatch(txns) {
   return out.map((t) => ({
     ...t,
     category: t.category ?? 'Other',
-    type: typeFor(t.category ?? 'Other', t.direction, t._personal),
+    type: typeFor(t.category ?? 'Other', t.direction),
     // An uncategorised merchant is worth a look even if the OCR was perfect.
     needs_review: t.needs_review || (!t.category && !t._personal),
   }))
