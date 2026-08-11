@@ -109,7 +109,7 @@ Three tables, all RLS'd to `auth.uid()`:
 
 ## Stack
 
-React 19 + Vite · Supabase (Postgres, RLS, magic-link auth) · Tesseract.js
+React 19 + Vite · Supabase (Postgres, RLS, emailed-code auth) · Tesseract.js
 (on-device OCR) · Gemini via two Vercel functions · vite-plugin-pwa ·
 recharts. No CSS framework, no state library, no ORM.
 
@@ -125,8 +125,9 @@ npm run dev
 ```
 
 Run `db/schema.sql` in the Supabase SQL editor once.
-[`SETUP.md`](SETUP.md) covers magic-link auth, the email template, the Gemini
-key, and deploying to Vercel + installing on the phone.
+[`SETUP.md`](SETUP.md) covers the emailed-code auth, the two branded email
+templates in `supabase/email/`, the Gemini key, and deploying to Vercel +
+installing on the phone.
 
 `npm run dev` also serves `api/categorise.js` and `api/ask.js`, so the AI tier
 is testable locally. Leave `GEMINI_API_KEY` out entirely and everything still

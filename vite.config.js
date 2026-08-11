@@ -106,7 +106,7 @@ export default defineConfig(({ mode }) => {
         // card. theme_color is the page, because that is what the status bar
         // sits above once the app is actually open. Two different jobs.
         // Printed by `npm run icons` — keep the two in step if the logo changes.
-        background_color: '#AED854',
+        background_color: '#A8E46C',
         theme_color: '#F1F1ED',
         icons: [
           { src: 'icon-192.png', sizes: '192x192', type: 'image/png' },

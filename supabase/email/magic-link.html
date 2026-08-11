@@ -1,0 +1,156 @@
+<!doctype html>
+<!--
+  Hisaab — "Magic Link" template. Despite the name this is the template Supabase
+  uses for every sign-in by an address that already exists, and because the body
+  below never once mentions {{ .ConfirmationURL }}, the mail that goes out is a
+  code and nothing else. That is the entire mechanism: the client asking for an
+  OTP does not decide it, this file does.
+
+  Paste into Supabase → Authentication → Emails → Magic Link.
+  Subject: Your Hisaab code is {{ .Token }}
+
+  Layout is tables and inline styles because Outlook still renders with Word.
+  Dark mode is the one thing that cannot be inlined — the .dk-* rules below carry
+  !important so they outrank the inline light values in clients that honour
+  prefers-color-scheme, and are simply ignored by the ones that don't.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="supported-color-schemes" content="light dark" />
+    <title>Your Hisaab code</title>
+    <style>
+      /* Kill the auto-linking iOS does to anything that smells like a phone
+         number — a six-digit code is exactly that shape, and a blue tappable
+         code in the middle of the card is the one thing that must not happen. */
+      a[x-apple-data-detectors] {
+        color: inherit !important;
+        text-decoration: none !important;
+      }
+      @media (prefers-color-scheme: dark) {
+        .dk-page { background: #121511 !important; }
+        .dk-card { background: #1e211d !important; border-color: #2c302a !important; }
+        .dk-text { color: #f3f5f1 !important; }
+        .dk-muted { color: #8f938c !important; }
+        .dk-rule { border-color: #2c302a !important; }
+      }
+      @media (max-width: 480px) {
+        .pad { padding-left: 22px !important; padding-right: 22px !important; }
+        .code { font-size: 32px !important; letter-spacing: 0.16em !important; }
+      }
+    </style>
+  </head>
+  <!-- The bright-green panel and the code block keep their colours in both
+       schemes. #9FE870 on #163300 is the brand, not a surface, and it clears
+       contrast either way. -->
+  <body
+    class="dk-page"
+    style="margin: 0; padding: 0; background: #f1f1ed; -webkit-font-smoothing: antialiased;"
+  >
+    <!-- Preview text. The code lands in the notification, so a phone on the
+         lock screen is often all the user needs to open. The spacer stops the
+         client padding the preview out with the first line of the card. -->
+    <div style="display: none; max-height: 0; overflow: hidden; opacity: 0;">
+      Your code is {{ .Token }} — good for one hour.
+      &#8199;&#65279;&#8199;&#65279;&#8199;&#65279;&#8199;&#65279;&#8199;&#65279;&#8199;&#65279;&#8199;&#65279;&#8199;&#65279;&#8199;&#65279;&#8199;&#65279;&#8199;&#65279;&#8199;&#65279;
+    </div>
+
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" class="dk-page" style="background: #f1f1ed;">
+      <tr>
+        <td align="center" style="padding: 32px 16px 44px;">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width: 480px;">
+            <!-- ── The signature panel ─────────────────────────────────── -->
+            <tr>
+              <td
+                class="pad"
+                style="background: #9fe870; border-radius: 26px; padding: 26px 28px 24px; text-align: left;"
+              >
+                <img
+                  src="{{ .SiteURL }}/icon-192.png"
+                  width="52"
+                  height="52"
+                  alt="Hisaab"
+                  style="display: block; width: 52px; height: 52px; border-radius: 13px; border: 0; margin-bottom: 18px;"
+                />
+                <div
+                  style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 27px; font-weight: 700; line-height: 1.14; letter-spacing: -0.03em; color: #163300;"
+                >
+                  Let&rsquo;s get you<br />back to your ledger.
+                </div>
+                <div
+                  style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 13px; font-weight: 500; line-height: 1.5; color: #3d5c22; margin-top: 10px;"
+                >
+                  Someone asked to sign in to Hisaab as {{ .Email }}.
+                </div>
+              </td>
+            </tr>
+
+            <tr><td style="height: 14px; line-height: 14px; font-size: 0;">&nbsp;</td></tr>
+
+            <!-- ── The code ────────────────────────────────────────────── -->
+            <tr>
+              <td
+                class="dk-card pad"
+                style="background: #ffffff; border: 1px solid #e4e4e1; border-radius: 18px; padding: 28px;"
+              >
+                <div
+                  class="dk-muted"
+                  style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 11px; font-weight: 600; letter-spacing: 0.09em; text-transform: uppercase; color: #6a6c6a;"
+                >
+                  Your code
+                </div>
+
+                <!-- Monospace, not the body face: a proportional 1 next to a
+                     proportional 8 makes a six-digit code harder to copy by eye
+                     than it has any need to be. -->
+                <div
+                  class="code"
+                  style="font-family: 'SF Mono', SFMono-Regular, ui-monospace, Menlo, Consolas, monospace; font-size: 38px; font-weight: 700; letter-spacing: 0.2em; line-height: 1.1; color: #163300; background: #e2f6d5; border-radius: 14px; padding: 20px 12px; text-align: center; margin: 12px 0 0;"
+                >
+                  {{ .Token }}
+                </div>
+
+                <div
+                  class="dk-text"
+                  style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 15px; line-height: 1.55; color: #0e0f0c; margin-top: 18px;"
+                >
+                  Type it into the app you already have open. It works for one hour, once.
+                </div>
+
+                <div
+                  class="dk-rule"
+                  style="border-top: 1px solid #e4e4e1; margin: 20px 0 0; padding-top: 16px;"
+                >
+                  <div
+                    class="dk-muted"
+                    style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 13px; line-height: 1.6; color: #6a6c6a;"
+                  >
+                    Didn&rsquo;t ask for this? Nothing has happened and nothing will &mdash;
+                    the code is useless without this inbox. You can ignore this email.
+                  </div>
+                </div>
+              </td>
+            </tr>
+
+            <!-- ── Footer ──────────────────────────────────────────────── -->
+            <tr>
+              <td class="pad" style="padding: 22px 28px 0; text-align: center;">
+                <div
+                  class="dk-muted"
+                  style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 12px; line-height: 1.65; color: #6a6c6a;"
+                >
+                  Hisaab reads your screenshots on your own device and keeps only the
+                  row &mdash; date, amount, merchant, category.
+                  <br /><br />
+                  हिसाब &middot; by Broombuilds
+                </div>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>

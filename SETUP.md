@@ -31,16 +31,21 @@ a green "RLS enabled" badge.
 
 ---
 
-## 3. Magic-link auth
+## 3. Email-code auth
+
+No password, no link — a six-digit code, typed into the app that is already
+open. There used to be a link here; on Android, tapping one inside Gmail opens
+whichever browser Gmail feels like rather than the installed PWA, so the session
+landed in a window nobody was looking at.
 
 ### 3a. Turn on the email provider
 
 **Authentication → Sign In / Providers → Email**
 
 - `Enable Email provider` — **on**
-- `Confirm email` — **on** (this is what makes the magic link a login link)
+- `Confirm email` — **on** (this is what makes the emailed code a login)
 - `Allow new users to sign up` — **on** while you sign up, then turn it **off**.
-  With it off, only your email can ever get a link. This is the whole access
+  With it off, only your email can ever get a code. This is the whole access
   control for a single-user app.
 
 ### 3b. Tell Supabase which URLs are allowed
@@ -52,63 +57,49 @@ a green "RLS enabled" badge.
 | Site URL | `https://hisaab.yourdomain.com` (your production URL) |
 | Redirect URLs | `http://localhost:5173/**` <br> `https://hisaab.yourdomain.com/**` <br> `https://*-yourname.vercel.app/**` |
 
-Without the localhost entry, links from local dev bounce to production and the
-login fails silently. The `/**` wildcard matters — an exact URL without it
-rejects any link carrying query params, which every magic link does.
+Site URL is not optional even with no link to redirect through: the email
+templates load the app icon from `{{ .SiteURL }}/icon-192.png`, so a wrong value
+here is a broken logo in every sign-in email. Redirect URLs no longer carry a
+login, but leave them correct — they are what any future OAuth or recovery flow
+would use.
 
-### 3c. The email itself
+### 3c. The emails
 
-**Authentication → Emails → Templates → Magic Link**
+Two templates, both in `supabase/email/` in this repo. Open each file, copy the
+whole thing, and paste it into the matching template with the dashboard editor
+switched to **Source / HTML**:
 
-Subject:
+| File | **Authentication → Emails →** | Subject |
+|---|---|---|
+| `supabase/email/magic-link.html` | Magic Link | `Your Hisaab code is {{ .Token }}` |
+| `supabase/email/confirm-signup.html` | Confirm signup | `Your Hisaab code is {{ .Token }}` |
 
-```
-Your Hisaab sign-in link
-```
+Both are needed. Supabase picks Confirm signup the first time an address is ever
+seen and Magic Link every time after, so leaving one on the stock template means
+a first sign-in that looks nothing like the second — and, worse, still carries a
+link.
 
-Message body (switch the editor to **Source / HTML** and replace everything):
+**This is the switch that makes the auth code-based.** Supabase decides what to
+send from what the template references, not from anything the app calls:
 
-```html
-<table width="100%" cellpadding="0" cellspacing="0" style="background:#0E1012;padding:40px 0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif">
-  <tr>
-    <td align="center">
-      <table width="100%" style="max-width:420px;background:#181B1E;border-radius:14px;padding:32px">
-        <tr>
-          <td>
-            <p style="margin:0 0 4px;color:#E8A33D;font-size:13px;letter-spacing:.12em;text-transform:uppercase">Hisaab</p>
-            <h1 style="margin:0 0 16px;color:#E8E6E1;font-size:22px;font-weight:600">Sign in</h1>
-            <p style="margin:0 0 28px;color:#8A8F94;font-size:15px;line-height:1.5">
-              Tap the button to open your ledger. The link works once and expires in an hour.
-            </p>
-            <a href="{{ .ConfirmationURL }}"
-               style="display:inline-block;background:#E8A33D;color:#0E1012;text-decoration:none;font-size:15px;font-weight:600;padding:13px 26px;border-radius:10px">
-              Open Hisaab
-            </a>
-            <p style="margin:28px 0 0;color:#8A8F94;font-size:13px;line-height:1.5">
-              Or paste this code into the app: <strong style="color:#E8E6E1;font-size:17px;letter-spacing:.15em">{{ .Token }}</strong>
-            </p>
-            <p style="margin:24px 0 0;padding-top:20px;border-top:1px solid #262A2E;color:#8A8F94;font-size:12px;line-height:1.5">
-              Didn't ask for this? Ignore it — nothing happens until the link is opened.
-            </p>
-          </td>
-        </tr>
-      </table>
-    </td>
-  </tr>
-</table>
-```
-
-**Save.** The template variables Supabase substitutes:
-
-| Variable | What it is |
+| Template contains | What arrives |
 |---|---|
-| `{{ .ConfirmationURL }}` | the full one-tap link (required — without it the email is useless) |
-| `{{ .Token }}` | the 6-digit code, for when tapping the link opens the wrong browser |
-| `{{ .SiteURL }}` / `{{ .Email }}` / `{{ .RedirectTo }}` | available, not used above |
+| `{{ .ConfirmationURL }}` | a one-tap link |
+| `{{ .Token }}` | a six-digit code |
+| both | both |
 
-The 6-digit code is not decoration. On Android, tapping a link inside Gmail can
-open a different browser than the installed PWA, which loses the session. The
-app has a code box for exactly that case.
+Neither file mentions `{{ .ConfirmationURL }}` anywhere, which is what makes the
+mail code-only. Put it back and the link comes back with it — and `SignIn.jsx`
+sends no `emailRedirectTo`, so that link would land on the Site URL regardless of
+which device asked.
+
+Other variables available: `{{ .SiteURL }}` and `{{ .Email }}`, both used above.
+
+The templates carry a `prefers-color-scheme: dark` block built from the same
+tokens as `src/styles.css`, so the email matches whichever way the phone is set.
+The bright-green panel and the code block stay fixed in both — that pairing is
+the brand, not a surface. Re-run `npm run icons` if the logo ever changes; the
+email pulls the same `icon-192.png` the app and the installer do.
 
 ### 3d. Email rate limit — read this before you get confused
 

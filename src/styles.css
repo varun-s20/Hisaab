@@ -113,6 +113,28 @@ body {
 button, input, select, textarea { font: inherit; color: inherit; }
 button { cursor: pointer; }
 
+/* Installed as an app, so it has to behave like one. The browser's own touch
+   affordances — the blue/grey tap flash (drawn in the element's shape, which is
+   why round buttons flashed a circle), the long-press callout, the double-tap
+   zoom delay, the drag-select on a label — all read as "web page" the moment
+   they appear. Killed on chrome only; real content stays selectable. */
+html { -webkit-tap-highlight-color: transparent; }
+button,
+a,
+label,
+summary,
+[role='switch'],
+[role='tab'] {
+  -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none;
+  touch-action: manipulation;
+  -webkit-user-select: none;
+  user-select: none;
+}
+/* A .field is a <label> wrapping its input — the rule above must not follow the
+   inheritance down into what the user is typing. */
+input, textarea, select { -webkit-user-select: auto; user-select: auto; }
+
 ::selection { background: var(--bright-green); color: var(--forest-green); }
 
 :focus-visible {
@@ -120,6 +142,10 @@ button { cursor: pointer; }
   outline-offset: 2px;
   border-radius: 6px;
 }
+/* Sheet.jsx hands focus back to whatever opened it, and some engines still call
+   that keyboard focus and paint their own ring on it. Only the deliberate
+   keyboard path above gets one. */
+:focus:not(:focus-visible) { outline: none; }
 
 /* Amounts. Columns of rupee figures that don't align look amateur. */
 .num {
@@ -1251,7 +1277,9 @@ button.row:active { transform: scale(0.985); }
 
 .tile.sm { width: 32px; height: 32px; border-radius: 9px; }
 .tile.sm svg { width: 16px; height: 16px; }
-.tile.empty { background: var(--neutral); border: 1px dashed var(--rule-strong); }
+/* Solid, not dashed. A dashed 32px square inside a solid-bordered picker read as
+   a rendering fault rather than as "nothing chosen yet". */
+.tile.empty { background: var(--neutral); border: 1px solid var(--rule); }
 
 .catgrid { display: grid; gap: 2px; }
 .catcell { position: relative; }

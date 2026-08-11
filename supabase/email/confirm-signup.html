@@ -1,0 +1,155 @@
+<!doctype html>
+<!--
+  Hisaab — "Confirm signup" template. Supabase reaches for this one, not Magic
+  Link, the first time an address is ever seen. Same mechanism as its sibling:
+  no {{ .ConfirmationURL }} anywhere in the body, so the mail is a code only.
+  The copy is the only difference, and it is worth the second file — "welcome"
+  and "welcome back" are not the same sentence.
+
+  Paste into Supabase → Authentication → Emails → Confirm signup.
+  Subject: Your Hisaab code is {{ .Token }}
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="supported-color-schemes" content="light dark" />
+    <title>Your Hisaab code</title>
+    <style>
+      a[x-apple-data-detectors] {
+        color: inherit !important;
+        text-decoration: none !important;
+      }
+      @media (prefers-color-scheme: dark) {
+        .dk-page { background: #121511 !important; }
+        .dk-card { background: #1e211d !important; border-color: #2c302a !important; }
+        .dk-text { color: #f3f5f1 !important; }
+        .dk-muted { color: #8f938c !important; }
+        .dk-rule { border-color: #2c302a !important; }
+      }
+      @media (max-width: 480px) {
+        .pad { padding-left: 22px !important; padding-right: 22px !important; }
+        .code { font-size: 32px !important; letter-spacing: 0.16em !important; }
+      }
+    </style>
+  </head>
+  <body
+    class="dk-page"
+    style="margin: 0; padding: 0; background: #f1f1ed; -webkit-font-smoothing: antialiased;"
+  >
+    <div style="display: none; max-height: 0; overflow: hidden; opacity: 0;">
+      Your code is {{ .Token }} — good for one hour.
+      &#8199;&#65279;&#8199;&#65279;&#8199;&#65279;&#8199;&#65279;&#8199;&#65279;&#8199;&#65279;&#8199;&#65279;&#8199;&#65279;&#8199;&#65279;&#8199;&#65279;&#8199;&#65279;&#8199;&#65279;
+    </div>
+
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" class="dk-page" style="background: #f1f1ed;">
+      <tr>
+        <td align="center" style="padding: 32px 16px 44px;">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width: 480px;">
+            <tr>
+              <td
+                class="pad"
+                style="background: #9fe870; border-radius: 26px; padding: 26px 28px 24px; text-align: left;"
+              >
+                <img
+                  src="{{ .SiteURL }}/icon-192.png"
+                  width="52"
+                  height="52"
+                  alt="Hisaab"
+                  style="display: block; width: 52px; height: 52px; border-radius: 13px; border: 0; margin-bottom: 18px;"
+                />
+                <div
+                  style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 27px; font-weight: 700; line-height: 1.14; letter-spacing: -0.03em; color: #163300;"
+                >
+                  Welcome to Hisaab.<br />Your money, understood.
+                </div>
+                <div
+                  style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 13px; font-weight: 500; line-height: 1.5; color: #3d5c22; margin-top: 10px;"
+                >
+                  One code and {{ .Email }} is your ledger. No password to invent.
+                </div>
+              </td>
+            </tr>
+
+            <tr><td style="height: 14px; line-height: 14px; font-size: 0;">&nbsp;</td></tr>
+
+            <tr>
+              <td
+                class="dk-card pad"
+                style="background: #ffffff; border: 1px solid #e4e4e1; border-radius: 18px; padding: 28px;"
+              >
+                <div
+                  class="dk-muted"
+                  style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 11px; font-weight: 600; letter-spacing: 0.09em; text-transform: uppercase; color: #6a6c6a;"
+                >
+                  Your code
+                </div>
+
+                <div
+                  class="code"
+                  style="font-family: 'SF Mono', SFMono-Regular, ui-monospace, Menlo, Consolas, monospace; font-size: 38px; font-weight: 700; letter-spacing: 0.2em; line-height: 1.1; color: #163300; background: #e2f6d5; border-radius: 14px; padding: 20px 12px; text-align: center; margin: 12px 0 0;"
+                >
+                  {{ .Token }}
+                </div>
+
+                <div
+                  class="dk-text"
+                  style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 15px; line-height: 1.55; color: #0e0f0c; margin-top: 18px;"
+                >
+                  Type it into the app you already have open. It works for one hour, once.
+                </div>
+
+                <div
+                  class="dk-rule"
+                  style="border-top: 1px solid #e4e4e1; margin: 20px 0 0; padding-top: 16px;"
+                >
+                  <div
+                    class="dk-text"
+                    style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 14px; font-weight: 600; line-height: 1.5; color: #0e0f0c; margin-bottom: 6px;"
+                  >
+                    Then: drop a screenshot.
+                  </div>
+                  <div
+                    class="dk-muted"
+                    style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 13px; line-height: 1.6; color: #6a6c6a;"
+                  >
+                    Any UPI payment screen &mdash; GPay, PhonePe, Paytm. Hisaab reads it,
+                    names the merchant and files it. The ledger writes itself from there.
+                  </div>
+                </div>
+
+                <div
+                  class="dk-rule"
+                  style="border-top: 1px solid #e4e4e1; margin: 16px 0 0; padding-top: 16px;"
+                >
+                  <div
+                    class="dk-muted"
+                    style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 13px; line-height: 1.6; color: #6a6c6a;"
+                  >
+                    Didn&rsquo;t sign up? No account exists until this code is used, so
+                    ignoring this email is enough to end it.
+                  </div>
+                </div>
+              </td>
+            </tr>
+
+            <tr>
+              <td class="pad" style="padding: 22px 28px 0; text-align: center;">
+                <div
+                  class="dk-muted"
+                  style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 12px; line-height: 1.65; color: #6a6c6a;"
+                >
+                  Screenshots are read on your own device and discarded. Only the row
+                  &mdash; date, amount, merchant, category &mdash; is ever stored.
+                  <br /><br />
+                  हिसाब &middot; by Broombuilds
+                </div>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>

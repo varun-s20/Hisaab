@@ -316,13 +316,18 @@ export default function Today({ onChange, reviewCount, goReview }) {
       )}
 
       <p style={{ textAlign: 'center', marginTop: 16 }}>
-        <button className="linkish quiet" onClick={() => setManual((m) => !m)}>
-          {manual ? 'Close' : 'Add a cash payment'}
+        <button className="linkish quiet" onClick={() => setManual(true)}>
+          Add a cash payment
         </button>
       </p>
 
+      {/* Mounted only while open, so every cash entry starts on empty fields.
+          ManualEntry holds the sheet down through its own exit before either
+          callback fires — same contract as EditSheet. */}
       {manual && (
         <ManualEntry
+          open={manual}
+          onClose={() => setManual(false)}
           onSaved={async () => {
             setManual(false)
             await load()
