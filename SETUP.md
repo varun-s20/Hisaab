@@ -138,9 +138,36 @@ Already have the key from aistudio.google.com. It goes **only** into Vercel:
 Check the live quota in AI Studio's rate-limit view, not blog posts — the
 numbers have been cut before.
 
-For local dev the AI step just fails soft (unknown merchants stay
-uncategorised and turn up in the weekly *Teach me* screen), so you don't need
-the key locally. If you want it locally, run `vercel dev` instead of `npm run dev`.
+### Testing it locally
+
+`npm run dev` serves `api/categorise.js` itself, so the AI tier can be exercised
+without deploying. Add to `.env.local`:
+
+```
+GEMINI_API_KEY=AIza...
+```
+
+**Without a `VITE_` prefix.** Vite only inlines `VITE_*` variables into the
+browser bundle; this one is read by the dev server in Node and never reaches a
+client. Renaming it to `VITE_GEMINI_API_KEY` would publish your key to anyone
+who opens DevTools.
+
+Restart the dev server, then check it from the browser console on the app:
+
+```js
+await fetch('/api/categorise', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ merchants: ['BHARATPE09283746', 'MSWIPE*CAFE COFFEE'] }),
+}).then(r => r.json())
+```
+
+Expect `{results: [{merchant, clean, category}, ...]}`. An empty `results` array
+means the key is missing or the quota is spent — the app fails soft either way,
+so unknown merchants just wait in *Teach me*.
+
+Leave the key out entirely and everything still works; you simply categorise
+those merchants by hand.
 
 ---
 
