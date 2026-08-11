@@ -191,10 +191,18 @@ export function extractTime(clean) {
 const UPI_HANDLE = /^[\w.\-]+@[a-z]{3,10}$/i
 const HUMAN_NAME = /^[A-Z][a-z]+(?: [A-Z][a-z]+){1,2}$/
 
+// Plenty of registered businesses are two or three Title-case words:
+// "Eazydiner Private Limited" reads exactly like a person to the regex above,
+// and calling it a transfer deletes it from every spending total. Any of these
+// words settles it — a person is not a Pvt Ltd.
+const NOT_A_PERSON =
+  /\b(ltd|limited|pvt|private|llp|llc|inc|corp|corporation|company|enterprises|traders|industries|retail|marketplace|services|solutions|technologies|store|stores|mart|supermarket|bazaar|foodcourt|restaurant|cafe|hotel|bakery|chemist|pharmacy|medical|clinic|hospital|agency|agencies|associates|brothers|sons|centre|center)\b/i
+
 export function isPersonal(payee) {
   if (!payee) return false
   const p = payee.trim()
-  return UPI_HANDLE.test(p) || HUMAN_NAME.test(p)
+  if (UPI_HANDLE.test(p)) return true
+  return HUMAN_NAME.test(p) && !NOT_A_PERSON.test(p)
 }
 
 // ── Dedup key ────────────────────────────────────────────────────────────────

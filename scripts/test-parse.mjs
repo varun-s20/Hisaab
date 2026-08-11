@@ -48,6 +48,16 @@ check('personal payments never reach the API', () => {
   assert.equal(isPersonal('BHARATPE09283746'), false)
 })
 
+check('a registered business is not a person', () => {
+  // Three Title-case words. Read as a person, its spend disappears into
+  // transfers — which is exactly what happened to ₹1,136 of dinner.
+  assert.equal(isPersonal('Eazydiner Private Limited'), false)
+  assert.equal(isPersonal('Destiny Retail Mdpl'), false)
+  assert.equal(isPersonal('Wellness Chemist'), false)
+  assert.equal(isPersonal('Shyam Departmental Store'), false)
+  assert.equal(isPersonal('Yasharth Saxena'), true) // still a person
+})
+
 check('app detection', () => {
   assert.equal(detectApp('Google Pay · UPI transaction ID 123'), 'gpay')
   assert.equal(detectApp('PhonePe Txn ID T2408'), 'phonepe')
