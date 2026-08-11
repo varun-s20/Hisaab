@@ -10,7 +10,10 @@ create table if not exists transactions (
   txn_date      date not null,
   txn_time      time,
 
-  amount        numeric(12,2) not null,  -- always positive
+  -- Nullable on purpose: a screenshot whose amount the OCR mangled still has to
+  -- be stored, or it vanishes with nothing but a count to show for it. It lands
+  -- in "Needs a look" with the raw text attached. Always positive when present.
+  amount        numeric(12,2),
   direction     text not null check (direction in ('debit','credit')),
   type          text not null default 'expense'
                 check (type in ('expense','income','transfer','refund','lent','repaid')),
@@ -56,6 +59,10 @@ create table if not exists merchant_map (
 );
 
 -- ── Row level security: nobody sees anyone else's money ───────────────────
+-- Migration for a database created before unreadable rows were stored rather
+-- than dropped. No-op on a fresh schema.
+alter table transactions alter column amount drop not null;
+
 alter table transactions enable row level security;
 alter table merchant_map enable row level security;
 

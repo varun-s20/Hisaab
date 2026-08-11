@@ -46,13 +46,12 @@ export default function Today({ onChange, reviewCount, goReview }) {
 
       // One history screenshot carries ~7 transactions, a receipt carries one.
       const parsed = texts.flatMap((t) => parseScreenshot(t.text))
-      const unreadable = parsed.filter((p) => !p.amount || !p.txn_date).length
 
       const categorised = await categoriseBatch(parsed)
-      const { saved, duplicates } = await saveTransactions(categorised)
+      const { saved, duplicates, unusable } = await saveTransactions(categorised)
       persistAILearnings(categorised).catch(() => {}) // never block on this
 
-      setResult({ saved, duplicates, unreadable })
+      setResult({ saved, duplicates, unusable })
       await refresh()
     } catch (err) {
       setResult({ error: err.message ?? String(err) })
@@ -147,7 +146,9 @@ function Summary({ result, reviewCount, goReview }) {
   }
   const bits = [`${result.saved} saved`]
   if (result.duplicates) bits.push(`${result.duplicates} already logged`)
-  if (result.unreadable) bits.push(`${result.unreadable} unreadable`)
+  // Rows the parser half-read are saved and flagged, so they're covered by the
+  // "needs a look" count. Only mention what genuinely couldn't be stored.
+  if (result.unusable) bits.push(`${result.unusable} not a payment`)
   return (
     <p style={{ textAlign: 'center', marginTop: 14, fontSize: 14 }} className="muted">
       {bits.join(' · ')}

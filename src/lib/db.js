@@ -1,5 +1,6 @@
 import { supabase } from './supabase'
 import { synthRef } from './parse'
+import { today } from './format'
 
 const COLUMNS = [
   'id', 'txn_ref', 'txn_date', 'txn_time', 'amount', 'direction', 'type',
@@ -11,11 +12,15 @@ const COLUMNS = [
 function forInsert(t) {
   return {
     txn_ref: t.txn_ref || synthRef(t),
-    txn_date: t.txn_date,
+    // txn_date is NOT NULL in the schema. A row the parser couldn't date lands
+    // on today, flagged — the date is the one field a person can always
+    // reconstruct from the screenshot.
+    txn_date: t.txn_date ?? today(),
     txn_time: t.txn_time ?? null,
-    amount: t.amount,
-    direction: t.direction,
-    type: t.type ?? 'expense',
+    amount: t.amount ?? null,
+    direction: t.direction ?? 'debit',
+    // An amount-less row is not yet a claim about spending.
+    type: t.amount ? (t.type ?? 'expense') : 'transfer',
     payee_raw: t.payee_raw,
     payee_clean: t.payee_clean ?? null,
     category: t.category ?? null,
@@ -38,10 +43,14 @@ function forInsert(t) {
  * upsert — hence the explicit pre-check rather than `onConflict`.
  */
 export async function saveTransactions(txns) {
-  const usable = txns.filter((t) => t.amount && t.txn_date && t.payee_raw)
+  // A row only needs something to identify it. A missing amount is stored as
+  // null and surfaces in "Needs a look" — dropping it here would lose the
+  // transaction entirely, leaving the user a count and no way to recover it.
+  const usable = txns.filter((t) => t.payee_raw && (t.amount || t.raw_text))
   const unusable = txns.length - usable.length
-  if (usable.length === 0) return { saved: 0, duplicates: 0, unusable, rows: [] }
+  if (usable.length === 0) return { saved: 0, duplicates: 0, unusable, unreadable: 0, rows: [] }
 
+  const unreadable = usable.filter((t) => !t.amount).length
   const rows = usable.map(forInsert)
   const refs = rows.map((r) => r.txn_ref)
 
@@ -60,11 +69,11 @@ export async function saveTransactions(txns) {
     fresh.push(r)
   }
   const duplicates = rows.length - fresh.length
-  if (fresh.length === 0) return { saved: 0, duplicates, unusable, rows: [] }
+  if (fresh.length === 0) return { saved: 0, duplicates, unusable, unreadable: 0, rows: [] }
 
   const { data, error } = await supabase.from('transactions').insert(fresh).select(COLUMNS)
   if (error) throw error
-  return { saved: data.length, duplicates, unusable, rows: data }
+  return { saved: data.length, duplicates, unusable, unreadable, rows: data }
 }
 
 export async function listTransactions({ from, to, limit = 500 } = {}) {
