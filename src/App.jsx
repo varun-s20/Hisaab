@@ -18,6 +18,7 @@ const Import = lazy(() => import('./screens/Import.jsx'))
 const Ask = lazy(() => import('./screens/Ask.jsx'))
 const Budgets = lazy(() => import('./screens/Budgets.jsx'))
 const Merchants = lazy(() => import('./screens/Merchants.jsx'))
+const Accounts = lazy(() => import('./screens/Accounts.jsx'))
 
 class ScreenBoundary extends Component {
   state = { failed: false }
@@ -175,6 +176,7 @@ export default function App() {
         {tab === 'insights' && <Insights goAsk={() => go('ask')} />}
         {tab === 'ask' && <Ask onBack={back} />}
         {tab === 'budgets' && <Budgets onBack={back} />}
+        {tab === 'accounts' && <Accounts onBack={back} />}
         {tab === 'merchants' && <Merchants onBack={back} onChange={refreshCounts} />}
         {tab === 'review' && <Review onChange={refreshCounts} onBack={back} />}
         {tab === 'teach' && <Teach onChange={refreshCounts} onBack={back} />}
@@ -329,6 +331,7 @@ function Reminders() {
 const MENU = [
   ['ask', 'Ask', 'A question about your money, answered on this device'],
   ['budgets', 'Budgets', 'A number to spend against, not just one spent'],
+  ['accounts', 'Accounts', 'What is left in each card, bank and envelope'],
   ['review', 'Needs a look', 'Rows the parser wasn’t sure about'],
   ['teach', 'Teach me', 'Name the merchants it doesn’t know yet'],
   ['merchants', 'What it has learned', 'See and correct every merchant it can name'],
@@ -395,11 +398,23 @@ function More({ go, email, reviewCount, untaughtCount }) {
         </div>
       </div>
 
+      {/* This paragraph is a promise, so it has to be the whole truth rather
+          than the flattering half. It used to say merchant names were "the
+          single thing sent to an AI", which stopped being true the day Ask
+          started sending your category and payment-method names — and stopped
+          again when it started sending your account names. What never goes is
+          still the part that matters, so say both. */}
       <p className="muted" style={{ fontSize: 12, marginTop: 24, lineHeight: 1.6 }}>
         Screenshots are read on this device and discarded. Only the parsed row —
         date, amount, merchant, category — is stored, plus the raw text of rows
-        flagged for review, which is cleared once you’ve looked at them. Unknown
-        merchant names are the single thing sent to an AI, without amounts or dates.
+        flagged for review, which is cleared once you’ve looked at them.
+      </p>
+      <p className="muted" style={{ fontSize: 12, marginTop: 10, lineHeight: 1.6 }}>
+        Two things reach an AI, both names only. Categorising sends merchant names it
+        doesn’t recognise — never one that looks like a person. Ask sends your question
+        along with the names of your categories, payment methods and accounts, and gets
+        back a filter that runs here. No amount, no date, and no transaction of yours is
+        ever sent.
       </p>
     </div>
   )

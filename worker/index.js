@@ -33,6 +33,25 @@ function bridgeEnv(env) {
   }
 }
 
+/**
+ * True when a browser says this call came from somewhere that is not us.
+ *
+ * The app and both endpoints are served by this same Worker, so a real call is
+ * always same-origin — and a browser attaches Origin to every POST, including
+ * same-origin ones. A mismatch is another site spending our Gemini quota
+ * through a tab someone happens to have open. There are deliberately no
+ * Access-Control-Allow-Origin headers to go with this: nothing legitimate is
+ * cross-origin, so there is nothing to allow.
+ *
+ * ponytail: this stops browsers, not curl — a script simply omits the header,
+ * and no CORS rule ever written has changed that. requireUser in api/_auth.js
+ * is what actually guards the key; this removes the drive-by case above it.
+ */
+function foreignOrigin(request) {
+  const origin = request.headers.get('origin')
+  return Boolean(origin) && origin !== new URL(request.url).origin
+}
+
 /** A Vercel-ish `res` that resolves into a real Response. */
 function makeRes() {
   let status = 200
@@ -80,6 +99,20 @@ export default {
     // ASSETS keeps the SPA fallback working if that scoping ever changes.
     if (!handler) {
       return env.ASSETS ? env.ASSETS.fetch(request) : new Response('Not found', { status: 404 })
+    }
+
+    // Endpoints only. Static assets are meant to be reachable from anywhere,
+    // and blocking them here would break the icons in an installed PWA.
+    //
+    // Checked before anything else runs, so a cross-origin OPTIONS preflight is
+    // answered with this rather than falling into the handler's bare 405 — and
+    // since the answer carries no CORS headers, the preflight fails and the
+    // real request is never sent.
+    if (foreignOrigin(request)) {
+      return new Response(JSON.stringify({ error: 'not allowed from here' }), {
+        status: 403,
+        headers: { 'content-type': 'application/json' },
+      })
     }
 
     bridgeEnv(env)

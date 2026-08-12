@@ -8,11 +8,14 @@ import {
   isPersonal, detectApp, synthRef, parseScreenshot,
 } from '../src/lib/parse.js'
 import { seedLookup } from '../src/lib/seeds.js'
-import { sanitise, guess, uncategorisedNote } from '../src/lib/query.js'
+import { sanitise, guess, uncategorisedNote, applySpec, group } from '../src/lib/query.js'
 
 const NOW = new Date(2026, 7, 11) // 11 Aug 2026
 let n = 0
 const check = (name, fn) => { fn(); n++; console.log(`  ok  ${name}`) }
+// Same thing for a check that has to await. Kept separate so the sync ones
+// stay callable without `await`, which is every one of them above.
+const acheck = async (name, fn) => { await fn(); n++; console.log(`  ok  ${name}`) }
 
 check('Indian grouping does not become 1', () => {
   assert.equal(toNumber('1,00,000'), 100000)
@@ -480,6 +483,10 @@ check('a category question names the payments it could not see', () => {
 // ── Statements: a sign is a direction ──────────────────────────────────────
 
 const { parseStatement } = await import('../src/lib/statement.js')
+// export.js pulls in db.js → supabase, which needs a browser env. toCSV itself
+// is pure, so it is redeclared here rather than imported: the writer and the
+// reader still have to agree, and that is what the round trip below checks.
+const { toCSV } = await import('../src/lib/csv.js')
 
 check('a + on a single-amount column is money in', () => {
   const { rows } = parseStatement(
@@ -488,6 +495,226 @@ check('a + on a single-amount column is money in', () => {
   assert.equal(rows[0].direction, 'credit')
   assert.equal(rows[0].amount, 5000)
   assert.equal(rows[1].direction, 'debit')
+})
+
+// ── Accounts are their own axis ────────────────────────────────────────────
+// The card, bank or envelope the money left, as distinct from the rail it
+// travelled on. Both are open lists now, so both are user-supplied text and
+// both have to survive sanitise() without becoming a pattern.
+
+const WALLETS = { methods: ['gpay', 'Amex'], accounts: ['HDFC card', 'Needs', 'SBI Bank'] }
+
+check('an account this ledger has never seen is dropped', () => {
+  const s = sanitise({ accounts: ['HDFC card', 'Barclays'], groupBy: 'account' }, WALLETS)
+  assert.deepEqual(s.accounts, ['HDFC card'])
+  assert.equal(s.groupBy, 'account')
+})
+
+check('an account name is text, not a pattern', () => {
+  // Named after the same failure the category test pins: a name reaching a
+  // RegExp unescaped turns "HDFC (card)" into a syntax error or, worse, a
+  // matcher for something else entirely.
+  const g = guess('what did i spend from HDFC card', WALLETS)
+  assert.deepEqual(g.accounts, ['HDFC card'])
+  // The account name is consumed, so it is not left behind to be read as a
+  // merchant — the whole question would otherwise filter on payee "hdfc card".
+  assert.equal(g.merchant, null)
+})
+
+check('the longest account name wins', () => {
+  // 'SBI Bank' and a bare 'Bank' would both match; taking the short one leaves
+  // "SBI" loose in the leftover and it becomes a merchant filter.
+  const g = guess('how much came out of SBI Bank last month', WALLETS)
+  assert.deepEqual(g.accounts, ['SBI Bank'])
+})
+
+check('which card is an account question, which app is a method one', () => {
+  assert.equal(guess('which card did i use most', WALLETS).groupBy, 'account')
+  assert.equal(guess('which envelope did it come out of', WALLETS).groupBy, 'account')
+  assert.equal(guess('which app did i pay with', WALLETS).groupBy, 'method')
+})
+
+check('rows are filtered and grouped by account', () => {
+  const rows = [
+    { txn_date: '2026-08-01', type: 'expense', amount: 100, account: 'Needs', category: 'Health' },
+    { txn_date: '2026-08-02', type: 'expense', amount: 250, account: 'Needs', category: 'Health' },
+    { txn_date: '2026-08-03', type: 'expense', amount: 900, account: 'HDFC card', category: 'Shopping' },
+    { txn_date: '2026-08-04', type: 'expense', amount: 40, account: null, category: 'Food & Dining' },
+  ]
+  const only = applySpec(rows, sanitise({ accounts: ['Needs'] }, WALLETS))
+  assert.equal(only.length, 2)
+  assert.equal(only.reduce((s, r) => s + r.amount, 0), 350)
+
+  const groups = group(rows, 'account')
+  assert.deepEqual(
+    groups.map((g) => [g.key, g.total]),
+    [['HDFC card', 900], ['Needs', 350], ['Not recorded', 40]],
+  )
+})
+
+// ── Another tracker's export ───────────────────────────────────────────────
+// Shaped exactly like ref/my_money_data_jul_aug.csv, down to the trailing space
+// after the last header and the newline inside a quoted note. Every field here
+// is one that used to be read wrongly or not at all.
+//
+// The shape is real; the money is invented. ref/ is gitignored because it is
+// somebody's actual ledger, and a fixture copied straight out of it would have
+// committed their salary to the repository to make the same assertions pass.
+
+const MYMONEY =
+  '"TIME","TYPE","AMOUNT","CATEGORY","ACCOUNT","NOTES" \n' +
+  '"Jul 09, 2026 10:59 AM","(-) Expense","1250.00","Education","Savings","course subscription " \n' +
+  '"Jul 09, 2026 12:41 PM","(+) Income","40000.00","Salary","Bank","salary jun 26" \n' +
+  '"Jul 10, 2026 1:32 PM","(-) Expense","30.00","Food","Savings","soy milk " \n' +
+  '"Jul 11, 2026 4:44 AM","(*) Transfer","15000.00","  -  ","Bank->Savings","savings for jul26" \n' +
+  '"Jul 11, 2026 4:44 AM","(-) Expense","500.00","Adjustment-","Needs","" \n' +
+  '"Jul 10, 2026 8:08 PM","(-) Expense","6000.00","Health","Recurring Payments","gym membership.\n\npaid across two months" \n'
+
+const my = parseStatement(MYMONEY, { now: new Date(2026, 7, 12) }).rows
+
+check('a column called TIME is still the date column', () => {
+  assert.equal(my.length, 6)
+  assert.equal(my[0].txn_date, '2026-07-09')
+  assert.equal(my[0].txn_time, '10:59:00')
+  // 1:32 PM is 13:32, not 01:32. A whole afternoon filed as morning would
+  // still land on the right day, so nothing would ever have flagged it.
+  assert.equal(my[2].txn_time, '13:32:00')
+})
+
+check('income is money in, not money out', () => {
+  // The whole bug in one row: "(+) Income" matched neither direction regex and
+  // fell to the 'debit' default, so a salary was booked as spending.
+  assert.equal(my[1].direction, 'credit')
+  assert.equal(my[1].amount, 40000)
+  // 'Salary' is not one of the fourteen. Left as-is, typeFor() sees a credit
+  // in a category that is not Income and calls it a transfer — which counts in
+  // no total at all, so the salary would vanish instead of merely landing in
+  // the wrong one.
+  assert.equal(my[1].category_hint, 'Income')
+})
+
+check('moving your own money between envelopes is not spending', () => {
+  const t = my[3]
+  assert.equal(t.category_hint, 'Transfers') // → typeFor() gives type 'transfer'
+  assert.equal(t.amount, 15000)
+  // Both sides, split. Left whole, "Bank->Savings" is its own account: it shows
+  // in the picker, in "group by account", and in a balance for an envelope
+  // nobody has — while the real Savings envelope never sees the money arrive.
+  assert.equal(t.account, 'Bank')
+  assert.equal(t.to_account, 'Savings')
+  // With no note, the row reads as where it went rather than where it came
+  // from — "Savings", not "Bank".
+  assert.equal(t.payee_raw, 'savings for jul26')
+})
+
+check('an ordinary row has no destination', () => {
+  assert.equal(my[0].account, 'Savings')
+  assert.equal(my[0].to_account, null)
+  // A hyphen in a name is not a separator. Only the arrow is.
+  assert.equal(toCSV([{ txn_date: '2026-07-11', account: 'Adjustment-' }]).includes('"Adjustment-"'), true)
+})
+
+// ── The exit door ──────────────────────────────────────────────────────────
+
+check('an export re-imports as the same rows', () => {
+  const out = toCSV([
+    { txn_date: '2026-08-01', txn_time: '13:32:00', payee_clean: 'Chai, hot', amount: 30, type: 'expense', category: 'Food & Dining', account: 'Wants', method: 'cash', txn_ref: 'r1', note: 'he said "hi"' },
+    { txn_date: '2026-08-02', payee_raw: 'salary', amount: 40000, type: 'income', category: 'Income', account: 'Bank' },
+  ])
+  const { rows, skipped } = parseStatement(out, { now: new Date(2026, 7, 12) })
+  assert.equal(skipped.length, 0)
+  assert.equal(rows.length, 2)
+  // A comma inside a merchant name and an escaped quote both survive the round
+  // trip — the two things a hand-rolled CSV writer gets wrong.
+  assert.equal(rows[0].payee_raw, 'Chai, hot')
+  assert.equal(rows[0].amount, 30)
+  assert.equal(rows[0].category_hint, 'Food & Dining')
+  assert.equal(rows[0].account, 'Wants')
+  assert.equal(rows[0].txn_ref, 'r1')
+  // The Type column says income, so it comes back as money in rather than as
+  // ₹40,000 of spending — the same rule the MyMoney import relies on.
+  assert.equal(rows[1].direction, 'credit')
+  assert.equal(rows[1].category_hint, 'Income')
+})
+
+check("another app's category vocabulary maps onto ours", () => {
+  assert.equal(my[0].category_hint, 'Education') // already one of the fourteen
+  assert.equal(my[2].category_hint, 'Food & Dining') // 'Food' is not
+  // Not a synonym of anything. Kept rather than flattened into Other — the row
+  // carries the text either way, and Other is a lie about what they filed it as.
+  assert.equal(my[4].category_hint, 'Adjustment-')
+})
+
+check('a row with an empty note is kept, not dropped', () => {
+  // db.saveTransactions drops anything with no payee_raw at all, so this row —
+  // a real date, a real amount, a real category — used to be thrown away for
+  // want of a name.
+  assert.equal(my[4].payee_raw, 'Adjustment-')
+  assert.equal(my[4].amount, 500)
+  assert.equal(my[4].needs_review, false)
+})
+
+check('a newline inside a quoted note does not split the row', () => {
+  assert.equal(my[5].amount, 6000)
+  assert.match(my[5].payee_raw, /^gym membership\. paid across two months$/)
+})
+
+check('a hand-made spreadsheet works too', () => {
+  const { rows } = parseStatement(
+    'Date,Item,Cost,Category\n03-08-2026,Auto to office,60,Transportation\n',
+    { now: new Date(2026, 7, 12) },
+  )
+  assert.equal(rows[0].payee_raw, 'Auto to office')
+  assert.equal(rows[0].amount, 60)
+  assert.equal(rows[0].category_hint, 'Transport')
+})
+
+check('a bank statement is not re-read as a budgeting app', () => {
+  // Dr/Cr in a type column must NOT become 'Income': an unrecognised bank
+  // credit is usually a friend paying you back, and that call belongs to
+  // typeFor(), which is deliberately more cautious about it.
+  const { rows } = parseStatement(
+    'Txn Date,Narration,Amount,Type\n01/08/2026,NEFT FROM RAHUL,"5,000",Cr\n',
+    { now: new Date(2026, 7, 12) },
+  )
+  assert.equal(rows[0].direction, 'credit')
+  assert.equal(rows[0].category_hint, null)
+})
+
+// ── The endpoints are ours alone ───────────────────────────────────────────
+// Driven through the real default export rather than the helper, because the
+// thing worth pinning is the *order*: the origin check has to happen before the
+// body is parsed, or a cross-origin preflight — which carries no body — gets a
+// 400 back and never reaches the block at all.
+
+const { default: worker } = await import('../worker/index.js')
+
+const call = (origin, init = {}) =>
+  worker.fetch(
+    new Request('https://hisaab.example.com/api/ask', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...(origin ? { origin } : {}) },
+      body: JSON.stringify({ question: 'what did I spend' }),
+      ...init,
+    }),
+    {},
+  )
+
+await acheck('another site cannot spend the Gemini key', async () => {
+  assert.equal((await call('https://evil.example')).status, 403)
+  // A sandboxed iframe or a file:// page sends this. Not us either.
+  assert.equal((await call('null')).status, 403)
+  // Preflight, no body: still blocked, and blocked for the right reason.
+  assert.equal((await call('https://evil.example', { method: 'OPTIONS', body: undefined })).status, 403)
+})
+
+await acheck('our own origin reaches the auth check', async () => {
+  // 401, not 403 — it got past the origin gate and was turned away for having
+  // no token, which is requireUser doing its job.
+  assert.equal((await call('https://hisaab.example.com')).status, 401)
+  // No Origin header at all is curl, and CORS was never able to stop curl.
+  // It reaches the same 401. That is the honest boundary.
+  assert.equal((await call(null)).status, 401)
 })
 
 console.log(`\n${n} checks passed`)

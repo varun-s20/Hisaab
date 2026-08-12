@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { updateTransaction, deleteTransaction } from '../lib/db'
+import { useEffect, useState } from 'react'
+import { updateTransaction, deleteTransaction, listAccounts, listMethods } from '../lib/db'
 import { learn } from '../lib/categorise'
 import { TYPE_OPTIONS, DIRECTIONS, COUNTED } from '../lib/categories'
 import { today } from '../lib/format'
@@ -24,6 +24,7 @@ const draftOf = (t) => ({
   direction: t.direction ?? 'debit',
   method: t.method ?? '',
   account: t.account ?? '',
+  to_account: t.to_account ?? '',
   note: t.note ?? '',
 })
 
@@ -33,6 +34,14 @@ export default function EditSheet({ row, open, onClose, onSaved, onDeleted }) {
   const [err, setErr] = useState('')
   const [confirming, setConfirming] = useState(false)
   const [discarding, setDiscarding] = useState(false)
+  // What this ledger already uses. Both cached in db.js, so the queries only
+  // actually run on the first edit of a session and after anything writes one.
+  const [accounts, setAccounts] = useState([])
+  const [methods, setMethods] = useState([])
+  useEffect(() => {
+    listAccounts().then(setAccounts).catch(() => {})
+    listMethods().then(setMethods).catch(() => {})
+  }, [])
   // The screens mount this component only while a row is being edited, so
   // telling them it closed pulls the sheet out of the tree before it can
   // animate. The flag lives here instead: drop it, let Sheet run its exit,
@@ -77,6 +86,10 @@ export default function EditSheet({ row, open, onClose, onSaved, onDeleted }) {
         direction: d.direction,
         method: d.method || null,
         account: d.account || null,
+        // Only a transfer has a destination. Cleared otherwise so a row that
+        // stops being a transfer does not leave a balance crediting an
+        // envelope that no longer receives anything.
+        to_account: d.type === 'transfer' ? d.to_account || null : null,
         note: d.note || null,
         needs_review: false,
       })
@@ -167,12 +180,19 @@ export default function EditSheet({ row, open, onClose, onSaved, onDeleted }) {
 
         <div className="pair">
           <Select label="Type" value={d.type} options={TYPE_OPTIONS} onChange={(v) => set('type', v)} />
+          {/* The rails the parser knows, plus whatever this ledger has
+              actually used, plus anything you name yourself — three credit
+              cards are three ways to pay and the built-in list only ever had
+              one word for all of them. */}
           <Select
             label="Paid with"
             value={d.method}
             placeholder="Not recorded"
-            options={[{ value: '', label: 'Not recorded' }, ...METHODS]}
+            options={[{ value: '', label: 'Not recorded' }, ...new Set([...METHODS, ...methods])]}
             onChange={(v) => set('method', v)}
+            allowNew
+            newLabel="New method"
+            newPlaceholder="Amex, HDFC Regalia, UPI Lite…"
           />
         </div>
 
@@ -182,16 +202,38 @@ export default function EditSheet({ row, open, onClose, onSaved, onDeleted }) {
           </p>
         )}
 
-        <label className="field">
-          <span>Account — which card or bank, if it matters</span>
-          <input
-            type="text"
-            value={d.account}
-            maxLength={40}
-            placeholder="HDFC card, SBI…"
-            onChange={(e) => set('account', e.target.value)}
+        {/* Was a free-text input, and free text fragments: "HDFC card",
+            "HDFC Card" and "hdfc" are three different accounts as far as every
+            total is concerned, which made grouping by one worthless. The list
+            is whatever this ledger already uses — see listAccounts. */}
+        <Select
+          label="Account — which card, bank or envelope"
+          value={d.account}
+          placeholder="Not recorded"
+          hint="Whatever you actually think in: HDFC card, SBI, Cash, or envelopes like Needs and Wants."
+          options={[{ value: '', label: 'Not recorded' }, ...accounts]}
+          onChange={(v) => set('account', v)}
+          allowNew
+          newLabel="New account"
+          newPlaceholder="HDFC card, SBI, Wants…"
+        />
+
+        {/* Only a transfer has one, and only a transfer should: this is the
+            half that makes an envelope balance possible, because it is the
+            only way a row says money *arrived* somewhere you own. */}
+        {d.type === 'transfer' && (
+          <Select
+            label="Into — where it landed"
+            value={d.to_account}
+            placeholder="Not recorded"
+            hint="A transfer leaves one pocket and enters another. Naming both is what lets Accounts tell you what is left in each."
+            options={[{ value: '', label: 'Not recorded' }, ...accounts.filter((a) => a !== d.account)]}
+            onChange={(v) => set('to_account', v)}
+            allowNew
+            newLabel="New account"
+            newPlaceholder="Needs, Wants, Savings…"
           />
-        </label>
+        )}
 
         <label className="field">
           <span>Note</span>

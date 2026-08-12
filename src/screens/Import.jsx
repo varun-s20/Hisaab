@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { parseStatement } from '../lib/statement'
 import { categoriseBatch, persistAILearnings } from '../lib/categorise'
 import { saveTransactions, deleteTransactions } from '../lib/db'
+import { exportAll, download } from '../lib/export'
 import { money } from '../lib/format'
 import CategoryIcon from '../components/CategoryIcon.jsx'
 import ScreenHeader from '../components/ScreenHeader.jsx'
@@ -15,6 +16,8 @@ const FIELDS = [
   ['amount', 'Amount'],
   ['debit', 'Debit'],
   ['credit', 'Credit'],
+  ['category', 'Category'],
+  ['account', 'Account'],
   ['ref', 'Reference'],
   ['type', 'Type'],
 ]
@@ -51,6 +54,24 @@ export default function Import({ onChange, onBack }) {
   const [result, setResult] = useState(null)
   const [undone, setUndone] = useState(0)
   const [error, setError] = useState(null) // a whole sentence — each path says its own thing
+  const [saving, setSaving] = useState(false)
+  const [dumped, setDumped] = useState(0)
+
+  async function dump() {
+    setSaving(true)
+    setError(null)
+    setDumped(0)
+    try {
+      const csv = await exportAll()
+      download(csv)
+      // Header line does not count as a row.
+      setDumped(csv.trimEnd().split('\r\n').length - 1)
+    } catch (err) {
+      setError(`Couldn’t build the file. ${err.message}`)
+    } finally {
+      setSaving(false)
+    }
+  }
 
   async function pick(e) {
     const f = e.target.files?.[0]
@@ -123,8 +144,10 @@ export default function Import({ onChange, onBack }) {
     <div className="screen">
       <ScreenHeader title="Import a statement" onBack={onBack} />
       <p className="muted">
-        Screenshots catch most days. A monthly export from GPay, PhonePe, Paytm or your bank
-        catches the rest. Anything already logged is skipped.
+        Screenshots catch most days. An export catches the rest — GPay, PhonePe, Paytm, your
+        bank, or another tracker you are moving off: MyMoney, Money Manager, Wallet, a
+        spreadsheet of your own. Categories in the file are kept. Anything already logged is
+        skipped.
       </p>
 
       <input
@@ -168,11 +191,16 @@ export default function Import({ onChange, onBack }) {
                   {file.rows.slice(0, 3).map((r, i) => (
                     <li key={i}>
                       <div className="row">
-                        <CategoryIcon category="Other" />
+                        {/* The file's own category, where it has one. Showing
+                            Other for every row made a correctly-read export
+                            look like it had been understood as nothing. */}
+                        <CategoryIcon category={r.category_hint ?? 'Other'} />
                         <div className="who">
                           <div className="name">{r.payee_raw ?? 'No description'}</div>
                           <div className="meta">
                             {r.txn_date}
+                            {r.category_hint ? ` · ${r.category_hint}` : ''}
+                            {r.account ? ` · ${r.account}` : ''}
                             {r.method ? ` · ${r.method}` : ''}
                             {r.txn_ref ? ` · ${r.txn_ref}` : ''}
                           </div>
@@ -236,6 +264,21 @@ export default function Import({ onChange, onBack }) {
       )}
 
       {error && <p className="alert">{error}</p>}
+
+      {/* The exit door, on the same screen as the entrance. You arrived by
+          exporting a CSV out of another app; the least this one owes you is the
+          same file back, in a shape lib/statement can read again. */}
+      <div className="danger" style={{ textAlign: 'left' }}>
+        <h2 className="section" style={{ marginTop: 0 }}>Take it with you</h2>
+        <p className="muted">
+          Every transaction, as a CSV. Opens in any spreadsheet, and this app can import it
+          back.
+        </p>
+        <button className="btn ghost" disabled={saving} onClick={dump}>
+          {saving ? 'Building the file…' : 'Export everything'}
+        </button>
+        {dumped && <p className="muted">{plural(dumped, 'row', 'rows')} exported.</p>}
+      </div>
     </div>
   )
 }

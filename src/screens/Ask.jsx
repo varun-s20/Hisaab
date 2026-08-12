@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { listTransactions, listMethods } from '../lib/db'
+import { listTransactions, listMethods, listAccounts } from '../lib/db'
 import { money, dayLabel, spendTotal, earnTotal, investTotal } from '../lib/format'
 import { postJson } from '../lib/api'
 import { allCategories, colorFor } from '../lib/categories'
@@ -23,6 +23,9 @@ import { Row } from './Today.jsx'
 const EXAMPLES = [
   'How much did I spend on food last month?',
   'Which app did I pay with most this month?',
+  // The account axis is invisible until something names it — nobody guesses a
+  // dimension a screen has never shown them.
+  'Which account did it come out of?',
   'Biggest transactions this year',
   'What did I spend at Swiggy?',
   'Money received last 30 days',
@@ -32,12 +35,14 @@ const GROUP_TITLE = {
   category: 'By category',
   merchant: 'By merchant',
   method: 'By payment method',
+  account: 'By account',
   day: 'By day',
 }
 
 export default function Ask({ onBack }) {
   const [q, setQ] = useState('')
   const [methods, setMethods] = useState([])
+  const [accounts, setAccounts] = useState([])
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState(null) // { spec, rows, local }
   const [err, setErr] = useState('')
@@ -45,6 +50,7 @@ export default function Ask({ onBack }) {
 
   useEffect(() => {
     listMethods().then(setMethods).catch(() => {})
+    listAccounts().then(setAccounts).catch(() => {})
     input.current?.focus()
   }, [])
 
@@ -62,16 +68,17 @@ export default function Ask({ onBack }) {
         today: new Date().toLocaleDateString('en-CA'), // local YYYY-MM-DD, not UTC
         categories: allCategories(),
         methods,
+        accounts,
       })
-      let spec = body ? sanitise(body.spec, { methods }) : null
+      let spec = body ? sanitise(body.spec, { methods, accounts }) : null
 
       if (!spec) {
         // Guarded: the local reader is the fallback, so a throw here would
         // leave the screen spinning with nothing left to fall back to.
         try {
-          spec = guess(text, { methods })
+          spec = guess(text, { methods, accounts })
         } catch {
-          spec = sanitise({}, { methods })
+          spec = sanitise({}, { methods, accounts })
         }
         local = true
       }
@@ -94,7 +101,7 @@ export default function Ask({ onBack }) {
         setBusy(false)
       }
     },
-    [busy, methods],
+    [busy, methods, accounts],
   )
 
   /** Re-read after a row was edited. Re-applies the spec that produced what is
@@ -169,8 +176,13 @@ export default function Ask({ onBack }) {
 
       {!result && !busy && (
         <>
+          {/* "Only the question goes out" was never quite true — the category
+              and method names went with it, and now the account names do too.
+              The promise worth making is the one that is actually kept, and it
+              is the stronger one anyway: no transaction of yours is ever sent. */}
           <p className="muted" style={{ fontSize: 13, margin: '2px 0 12px' }}>
-            Only the question goes out. Your transactions are filtered here, on this device.
+            Your question and the names of your categories, methods and accounts go out. No
+            transaction does — a filter comes back and runs here, on this device.
           </p>
           <div className="examples">
             {EXAMPLES.map((e) => (

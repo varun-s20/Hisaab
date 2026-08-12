@@ -40,6 +40,9 @@ export default async function handler(req, res) {
   const today = ISO.test(req.body?.today ?? '') ? req.body.today : new Date().toISOString().slice(0, 10)
   const categories = list(req.body?.categories, 40, ['Other'])
   const methods = list(req.body?.methods, 20, [])
+  // The user's own cards, banks and envelopes. Names only — still no amounts,
+  // no dates, no merchants. The guard at the top of this file is unchanged.
+  const accounts = list(req.body?.accounts, 30, [])
 
   if (!process.env.GEMINI_API_KEY) {
     console.error('[ask] GEMINI_API_KEY is not set')
@@ -52,6 +55,7 @@ You never see their transactions and you never answer the question yourself.
 Today is ${today}. Their week starts Monday. Currency is INR.
 Categories available: ${categories.join(', ')}
 Payment methods available: ${methods.length ? methods.join(', ') : '(none recorded)'}
+Accounts available: ${accounts.length ? accounts.join(', ') : '(none recorded)'}
 
 Return ONLY this JSON object, no markdown fences, no commentary:
 {
@@ -60,10 +64,11 @@ Return ONLY this JSON object, no markdown fences, no commentary:
   "categories": [],
   "types": [],
   "methods": [],
+  "accounts": [],
   "merchant": "substring to match, or null",
   "minAmount": null,
   "maxAmount": null,
-  "groupBy": "category | merchant | method | day | null",
+  "groupBy": "category | merchant | method | account | day | null",
   "sort": "amount | date",
   "answer": "one short sentence restating what is being shown"
 }
@@ -76,10 +81,15 @@ Rules:
   Questions about a specific merchant, "my biggest transaction", or "all transactions" use [].
 - Only use method names from the list above. These are the apps or rails a payment
   went through (gpay, phonepe, paytm, cash, UPI, NEFT...).
+- Only use account names from the list above, spelled exactly. These are the cards,
+  banks and envelopes the money came OUT of (HDFC card, SBI, Needs, Wants...).
+  The method is how it travelled; the account is which pocket it left. A question
+  naming a card or a bank or an envelope is about accounts, not methods.
 - If no period is stated, leave from and to null — that means all of time.
 - groupBy "method" answers "which app did I pay with". groupBy "merchant" answers
-  "who did I pay most". groupBy "category" answers "where did it go". groupBy "day"
-  answers "which day". Use null when a single total answers the question.
+  "who did I pay most". groupBy "category" answers "where did it go". groupBy
+  "account" answers "which card, bank or envelope did it come out of". groupBy
+  "day" answers "which day". Use null when a single total answers the question.
 - sort "amount" for biggest/most/largest, "date" otherwise.
 - "answer" must describe the filter, never invent a figure. No rupee amounts in it.
 

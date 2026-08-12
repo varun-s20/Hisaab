@@ -2,5 +2,18 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "rewrites": [
     { "source": "/share-target", "destination": "/index.html" }
+  ],
+  "headers": [
+    {
+      "//": "The same five as public/_headers, which only Cloudflare reads. frame-ancestors has to arrive over HTTP — a browser ignores it in the <meta> CSP in index.html, so without this the app can be framed and a signed-in person steered into taps they cannot see.",
+      "source": "/(.*)",
+      "headers": [
+        { "key": "Content-Security-Policy", "value": "frame-ancestors 'none'" },
+        { "key": "X-Frame-Options", "value": "DENY" },
+        { "key": "X-Content-Type-Options", "value": "nosniff" },
+        { "key": "Referrer-Policy", "value": "no-referrer" },
+        { "key": "Permissions-Policy", "value": "camera=(), microphone=(), geolocation=(), payment=(), usb=()" }
+      ]
+    }
   ]
 }

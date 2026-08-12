@@ -31,8 +31,28 @@ if not exists` will not widen a CHECK constraint on a table that is already
 there, so without it saving a row as an *investment* fails with
 `violates check constraint "transactions_type_check"`. It touches no data.
 
-Verify: **Table Editor** should now show `transactions` and `merchant_map`, both with
-a green "RLS enabled" badge.
+**On a database created before the approval queue existed, re-run the whole of
+`db/schema.sql`.** Every statement in it is `if not exists` or a
+`drop policy` / `create policy` pair, so re-running is a no-op on everything
+that is already there and adds `access_requests`. Without that table, a new
+address gets the invite-only message and you never see that they asked.
+
+**Then run `db/migrate-accounts.sql`.** `create table if not exists` will not
+add a column to a table that already exists, and will not widen a unique
+constraint — so on an existing database this is what adds:
+
+- `transactions.to_account`, the half of a transfer that says where the money
+  *landed*. Without it an envelope balance is unanswerable, and a budgeting-app
+  import leaves rows filed under an account literally called
+  `SBI Bank->Needs`. The migration splits any it finds.
+- `budgets.scope`, so a monthly cap can name an account rather than a category,
+  and the unique index that has to gain the column with it.
+
+It ends with a `select` that should return **zero rows**. Anything it returns
+still has both halves of a transfer in one cell.
+
+Verify: **Table Editor** should now show `transactions`, `merchant_map`,
+`budgets` and `access_requests`, all with a green "RLS enabled" badge.
 
 ---
 
@@ -49,9 +69,58 @@ landed in a window nobody was looking at.
 
 - `Enable Email provider` — **on**
 - `Confirm email` — **on** (this is what makes the emailed code a login)
-- `Allow new users to sign up` — **on** while you sign up, then turn it **off**.
-  With it off, only your email can ever get a code. This is the whole access
-  control for a single-user app.
+- `Allow new users to sign up` — **on** while you create your own account, then
+  turn it **off** and leave it off. See 3a-2.
+
+### 3a-2. Sign-up is by approval
+
+Two locks, and either one is enough:
+
+1. **`Allow new users to sign up` — off.** Server-side, applies to every client
+   there will ever be, including one written by somebody else against the same
+   anon key.
+2. **`shouldCreateUser: false`** in `src/screens/SignIn.jsx`. Belt to that
+   braces, and the thing that makes the app *say* something useful when the
+   address is unknown instead of showing a raw API error.
+
+Without either, anyone with an email address can create an account — and an
+account is a token, and a token passes `api/_auth.js` and spends your
+`GEMINI_API_KEY` on every call it likes.
+
+**What someone new sees.** They type their address, get
+*"Hisaab is invite-only. Your request has been noted"*, and a row lands in
+`access_requests`.
+
+**This screen does tell a stranger whether an address has an account** — a known
+one goes to the code field, an unknown one gets the invite-only line. That is
+account enumeration, and it is the price of telling someone honestly that they
+need to ask rather than leaving them staring at a code that will never arrive.
+For an invite-only app it is a fair trade: knowing an address is registered gets
+an attacker no closer to the mailbox, which is the only key. If you ever want it
+closed, show the "check your email" line unconditionally and drop the request
+flow — you cannot have both.
+
+**How you approve, start to finish:**
+
+1. **Table Editor → `access_requests`** — the queue. Sorted newest last.
+2. Decide. If you don't recognise the address, do nothing; nothing happens.
+3. **Authentication → Users → Add user → Send invitation**, using the same
+   address. No password to invent, and the invite link works on its own —
+   `detectSessionInUrl` is on in `src/lib/supabase.js`.
+   *Prefer `Create new user` with `Auto Confirm User` if you'd rather they never
+   get a link at all; you'll have to type a throwaway password they will never
+   use, because sign-in is by code.*
+4. Tell them they're in. They enter the same address and now get a code.
+5. Delete the row from `access_requests`. Nothing reads it, so this is only
+   housekeeping — but a queue you clear is a queue you can trust.
+
+**To revoke:** Authentication → Users → delete the user. Their rows go with
+them; every table is `references auth.users(id)`.
+
+**Note the table is insert-only.** `db/schema.sql` grants INSERT and no SELECT,
+so nobody — signed in or not — can read the list back through the API. Only the
+dashboard can, because it uses the service role and bypasses RLS. That is why
+there is no admin screen in the app to build, secure, or forget about.
 
 ### 3b. Tell Supabase which URLs are allowed
 

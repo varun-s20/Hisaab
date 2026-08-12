@@ -25,6 +25,22 @@ const Logo = ({ size = 76 }) => (
 // Whether the email carries a link, a code, or both is decided by the Supabase
 // email template, not by this file — supabase/email/*.html use {{ .Token }}
 // alone, which is what makes the sent mail code-only. See SETUP.md §Auth.
+//
+// Sign-up is by approval. Anyone may ask; only the admin creates the account.
+
+/**
+ * Supabase's answer when the address has no account and this app is not allowed
+ * to make one. Two shapes, because there are two locks and either can be the
+ * one that fires: `otp_disabled` is `shouldCreateUser: false` below,
+ * `signup_disabled` is the project-wide toggle (SETUP.md §3a).
+ *
+ * The message is matched as well as the code because the code field was added
+ * to gotrue after both messages existed, and an older project sends only one.
+ */
+const unknownAddress = (error) =>
+  error?.code === 'otp_disabled' ||
+  error?.code === 'signup_disabled' ||
+  /signups? not allowed/i.test(error?.message ?? '')
 
 export default function SignIn() {
   const [email, setEmail] = useState('')
@@ -48,6 +64,22 @@ export default function SignIn() {
     )
   }
 
+  /**
+   * Record the request and say so. The row is the whole approval flow: nothing
+   * can read `access_requests` back through the API (db/schema.sql grants
+   * INSERT and nothing else), so the admin reads it in the Supabase dashboard
+   * and creates the account there. No admin screen, no second role to get wrong.
+   */
+  async function askForAccess(address) {
+    // A repeat ask hits the unique index on email. That is not a failure — it
+    // means the request is already sitting there — so the line is the same
+    // either way, and the error is deliberately not shown.
+    await supabase.from('access_requests').insert({ email: address })
+    setNote(
+      'Hisaab is invite-only. Your request has been noted — you’ll be able to sign in once it’s approved.',
+    )
+  }
+
   // No emailRedirectTo: there is no link to come back through. Passing one only
   // tells Supabase where a link it isn't sending would have pointed.
   async function sendCode(e, again) {
@@ -55,9 +87,24 @@ export default function SignIn() {
     setBusy(true)
     setMsg(null)
     setNote(null)
-    const { error } = await supabase.auth.signInWithOtp({ email: email.trim() })
+    // Lower-cased so the request row and the account the admin creates from it
+    // are the same string. Supabase treats the address case-insensitively; the
+    // unique index on access_requests.email does not.
+    const address = email.trim().toLowerCase()
+    const { error } = await supabase.auth.signInWithOtp({
+      email: address,
+      // Sign-up is by approval, not self-service. Without this, anyone with an
+      // email address gets an account — and with it a token that passes
+      // api/_auth.js and spends the owner's Gemini quota on every call.
+      options: { shouldCreateUser: false },
+    })
     setBusy(false)
-    if (error) return setMsg(error.message)
+    if (error) {
+      // "Signups not allowed" is not an error the person can act on, and the
+      // raw wording reads as a broken app rather than a closed door.
+      if (unknownAddress(error)) return askForAccess(address)
+      return setMsg(error.message)
+    }
     setSent(true)
     // Resending is silent otherwise — the screen already says "check your
     // email", so nothing on it changes and the tap reads as having missed.

@@ -3,11 +3,54 @@ import { synthRef } from './parse'
 import { normalise } from './seeds'
 import { today } from './format'
 
-const COLUMNS = [
+const BASE = [
   'id', 'txn_ref', 'txn_date', 'txn_time', 'amount', 'direction', 'type',
   'payee_raw', 'payee_clean', 'category', 'subcategory', 'method', 'account',
   'source', 'confidence', 'needs_review', 'note', 'created_at',
-].join(', ')
+]
+
+/**
+ * `to_account` only exists once db/migrate-accounts.sql has run, and every read
+ * and write in this file names it.
+ *
+ * On a database that has not run the migration each one comes back 42703,
+ * `undefined_column` — which is not one broken feature but Today, Ledger,
+ * Insights, Review and every save at once. A deploy that goes out ahead of the
+ * SQL would take the whole app dark, and the error a person actually sees is
+ * "column transactions.to_account does not exist" on a screen that has never
+ * mentioned a column.
+ *
+ * So: try it, and if the column is genuinely not there, drop it for the rest of
+ * the session. Costs one failed request on an unmigrated database, nothing at
+ * all on a migrated one, and the app keeps working — minus the balances that
+ * need the column, which is the honest amount of degradation.
+ */
+let hasToAccount = true
+
+const COLUMNS = () => (hasToAccount ? [...BASE, 'to_account'] : BASE).join(', ')
+
+const MISSING_COLUMN = '42703'
+
+/**
+ * Run a PostgREST call that names `to_account`, once more without it if the
+ * column turns out not to exist. `run` is handed the column list so a caller
+ * can build its own select; it must return the raw `{ data, error }`.
+ */
+async function withToAccount(run) {
+  const first = await run(COLUMNS())
+  if (!first?.error || first.error.code !== MISSING_COLUMN || !hasToAccount) return first
+  hasToAccount = false
+  console.warn('[db] to_account is missing — run db/migrate-accounts.sql. Account balances are off until you do.')
+  return run(COLUMNS())
+}
+
+/** Strip what the database cannot store yet, so a write survives too. */
+const writable = (row) => {
+  if (hasToAccount) return row
+  const { to_account, ...rest } = row
+  void to_account
+  return rest
+}
 
 /**
  * numeric(12,2) tops out just under ten billion. An OCR'd account number that
@@ -58,6 +101,9 @@ function forInsert(t) {
     category: t.category ?? null,
     method: t.method ?? null,
     account: t.account ?? null,
+    // Only a transfer has one. Kept off everything else so "group by account"
+    // and every balance below can treat a non-null value as money arriving.
+    to_account: t.type === 'transfer' || t.category === 'Transfers' ? (t.to_account ?? null) : null,
     source: t.source ?? 'screenshot',
     confidence: t.confidence ?? 1.0,
     needs_review,
@@ -83,7 +129,9 @@ function forInsert(t) {
 async function insertRows(rows) {
   if (rows.length === 0) return { saved: [], rejected: 0 }
 
-  const { data, error } = await supabase.from('transactions').insert(rows).select(COLUMNS)
+  const { data, error } = await withToAccount((cols) =>
+    supabase.from('transactions').insert(rows.map(writable)).select(cols),
+  )
   if (!error) return { saved: data ?? [], rejected: 0 }
 
   // Only a row-level rejection is worth isolating. Retrying a network or auth
@@ -144,6 +192,7 @@ export async function saveTransactions(txns) {
   }
 
   const { saved, rejected } = await insertRows(fresh)
+  forgetAccounts() // an import is how most accounts arrive
   return { saved: saved.length, duplicates, unusable, unreadable, rejected, rows: saved }
 }
 
@@ -161,8 +210,8 @@ export async function saveTransactions(txns) {
 const PAGE = 1000
 
 export async function listTransactions({ from, to, limit = 500 } = {}) {
-  const page = (offset, size) => {
-    let q = supabase.from('transactions').select(COLUMNS)
+  const page = (offset, size, cols) => {
+    let q = supabase.from('transactions').select(cols)
     if (from) q = q.gte('txn_date', from)
     if (to) q = q.lte('txn_date', to)
     return q
@@ -175,7 +224,7 @@ export async function listTransactions({ from, to, limit = 500 } = {}) {
   const out = []
   while (out.length < limit) {
     const size = Math.min(PAGE, limit - out.length)
-    const { data, error } = await page(out.length, size)
+    const { data, error } = await withToAccount((cols) => page(out.length, size, cols))
     if (error) throw error
     out.push(...(data ?? []))
     if (!data || data.length < size) break
@@ -184,24 +233,168 @@ export async function listTransactions({ from, to, limit = 500 } = {}) {
 }
 
 /** The payment rails actually present in this ledger — gpay, phonepe, cash,
- *  NEFT… Ask needs the real list so a question can name one, and so the model
- *  is never told about apps you don't use. */
+ *  NEFT, or a card you named yourself. Ask needs the real list so a question
+ *  can name one, and so the model is never told about apps you don't use. */
+let methodCache = null
+
 export async function listMethods() {
+  if (methodCache) return methodCache
   const { data, error } = await supabase
     .from('transactions')
     .select('method')
     .not('method', 'is', null)
     .limit(2000)
   if (error) return []
-  return [...new Set((data ?? []).map((r) => r.method).filter(Boolean))].sort()
+  methodCache = [...new Set((data ?? []).map((r) => r.method).filter(Boolean))].sort()
+  return methodCache
+}
+
+/**
+ * The accounts actually present in this ledger — "HDFC card", "SBI", or the
+ * envelopes a budgeting-app import brought with it: Needs, Wants, Savings,
+ * Recurring Payments.
+ *
+ * ponytail: derived, never stored. There is no accounts table and nothing in
+ * localStorage, so there is no list to keep in sync across devices, nothing to
+ * migrate, and no delete flow to build — stop using an account and it leaves on
+ * its own. Typing a new one in the picker is how you make it, and it is real
+ * from the moment a row carries it.
+ *
+ * Cached because EditSheet asks on every open, and this is the same shape as
+ * listMethods above including its ceiling: 2000 rows over the wire to find ten
+ * strings. A `select distinct` RPC if either ever bites.
+ */
+let accountCache = null
+
+export async function listAccounts() {
+  if (accountCache) return accountCache
+  // Degrades rather than throws: EditSheet asks for this, and an unmigrated
+  // database must not make editing a row impossible. One column instead of two,
+  // and the picker still works.
+  const { data, error } = hasToAccount
+    ? await supabase
+        .from('transactions')
+        .select('account, to_account')
+        .or('account.not.is.null,to_account.not.is.null')
+        .limit(2000)
+    : await supabase.from('transactions').select('account').not('account', 'is', null).limit(2000)
+  if (error?.code === MISSING_COLUMN) {
+    hasToAccount = false
+    return listAccounts()
+  }
+  if (error) return []
+  // Both sides. An envelope you have only ever funded — money in, nothing spent
+  // yet — is still an account, and reading `account` alone made it invisible
+  // until the first time you paid from it.
+  const seen = new Set()
+  for (const r of data ?? []) {
+    if (r.account) seen.add(r.account)
+    if (r.to_account) seen.add(r.to_account)
+  }
+  accountCache = [...seen].sort()
+  return accountCache
+}
+
+/**
+ * What is left in each account: everything that arrived, minus everything that
+ * left. The number an envelope budgeter checks daily and the app could not
+ * answer.
+ *
+ *   in   transfers whose to_account is this one, and credits landing in it
+ *   out  every debit from it, spending and transfers out alike
+ *
+ * A `transfer` counts on both sides here and in no spending total anywhere
+ * else, which is the point of the type: moving your own money changes where it
+ * is without changing how much of it there is.
+ *
+ * ponytail: summed on the device over the narrowest possible select. An
+ * aggregate would need a Postgres function and a migration to go with it; this
+ * is five columns and stays correct while a ledger is small enough to hold.
+ * The 5000 ceiling is stated in the caller — Budgets says so on screen.
+ */
+export const BALANCE_ROWS = 5000
+
+export async function accountBalances() {
+  if (!hasToAccount) throw new Error('Run db/migrate-accounts.sql — this screen needs the to_account column.')
+  const { data, error } = await supabase
+    .from('transactions')
+    .select('account, to_account, amount, direction, type')
+    .or('account.not.is.null,to_account.not.is.null')
+    .limit(BALANCE_ROWS)
+  if (error?.code === MISSING_COLUMN) {
+    hasToAccount = false
+    throw new Error('Run db/migrate-accounts.sql — this screen needs the to_account column.')
+  }
+  if (error) throw error
+
+  const acc = new Map()
+  const at = (name) => {
+    if (!acc.has(name)) acc.set(name, { account: name, in: 0, out: 0, count: 0 })
+    return acc.get(name)
+  }
+
+  for (const r of data ?? []) {
+    const n = Number(r.amount)
+    if (!Number.isFinite(n)) continue
+    // A destination only means "money arrived here" on a row that is actually a
+    // move between two of your own pockets. On a credit-direction row it would
+    // otherwise be counted twice — once into `account` as money in, once into
+    // `to_account` — inventing a rupee that never existed.
+    if (r.to_account && r.type === 'transfer') at(r.to_account).in += n
+    if (!r.account) continue
+    const a = at(r.account)
+    a.count += 1
+    if (r.direction === 'credit') a.in += n
+    else a.out += n
+  }
+
+  return [...acc.values()]
+    .map((a) => ({ ...a, balance: a.in - a.out }))
+    .sort((a, b) => b.balance - a.balance)
+}
+
+/**
+ * Fold one account into another, everywhere it appears.
+ *
+ * Free text fragments even behind a picker: an import brings "SBI Bank" and you
+ * later type "SBI". Both sides are rewritten, because a transfer names an
+ * account in `to_account` and renaming only the source would leave the other
+ * half pointing at a name that no longer exists.
+ */
+export async function mergeAccount(from, to) {
+  const target = to?.trim() || null
+  if (!from || from === target) return 0
+  for (const column of hasToAccount ? ['account', 'to_account'] : ['account']) {
+    const { error } = await supabase
+      .from('transactions')
+      .update({ [column]: target })
+      .eq(column, from)
+    if (error) throw error
+  }
+  // A cap set on the old name would otherwise sit there capping nothing.
+  // Untouched on an unmigrated database, where an account cap cannot exist.
+  if (hasScope) {
+    await supabase.from('budgets').delete().eq('scope', 'account').eq('category', from)
+  }
+  forgetAccounts()
+  return 1
+}
+
+/** Both lists are read off the rows, so both go stale the moment a row is
+ *  written. saveTransactions and updateTransaction are the only two writers. */
+const forgetAccounts = () => {
+  accountCache = null
+  methodCache = null
 }
 
 export async function listNeedsReview() {
-  const { data, error } = await supabase
-    .from('transactions')
-    .select(`${COLUMNS}, raw_text`)
-    .eq('needs_review', true)
-    .order('txn_date', { ascending: false })
+  const { data, error } = await withToAccount((cols) =>
+    supabase
+      .from('transactions')
+      .select(`${cols}, raw_text`)
+      .eq('needs_review', true)
+      .order('txn_date', { ascending: false }),
+  )
   if (error) throw error
   return data ?? []
 }
@@ -216,13 +409,11 @@ export async function countNeedsReview() {
 }
 
 export async function updateTransaction(id, patch) {
-  const { data, error } = await supabase
-    .from('transactions')
-    .update(patch)
-    .eq('id', id)
-    .select(COLUMNS)
-    .single()
+  const { data, error } = await withToAccount((cols) =>
+    supabase.from('transactions').update(writable(patch)).eq('id', id).select(cols).single(),
+  )
   if (error) throw error
+  if ('account' in patch || 'method' in patch) forgetAccounts()
   return data
 }
 
@@ -244,24 +435,61 @@ export async function deleteTransactions(ids) {
 // Category '*' is the cap for the whole month. See db/schema.sql.
 export const TOTAL_BUDGET = '*'
 
+// `scope` says whether the `category` column is naming a category or an
+// account. Envelope budgeting caps the pocket rather than the kind of spending:
+// "₹7,500 into Wants this month" is the decision people actually make, and
+// which categories it lands on is the consequence. Defaulted everywhere so
+// every existing call still means what it did.
+/**
+ * Same migration problem as `to_account`, on a screen that already existed:
+ * without `scope` this select is a 42703 and Budgets — which worked yesterday —
+ * shows a failure instead of the caps someone already set. Fall back to the old
+ * shape and call everything a category budget, which is exactly what every row
+ * in an unmigrated table is.
+ */
+let hasScope = true
+
 export async function listBudgets() {
-  const { data, error } = await supabase.from('budgets').select('category, amount')
+  const { data, error } = hasScope
+    ? await supabase.from('budgets').select('scope, category, amount')
+    : await supabase.from('budgets').select('category, amount')
+  if (error?.code === MISSING_COLUMN) {
+    hasScope = false
+    return listBudgets()
+  }
   // Throws rather than returning []. A budget screen that says "No budgets yet"
   // because the network dropped is telling the user something false about their
   // own settings; the screen knows how to show a failure.
   if (error) throw error
-  return data ?? []
+  return (data ?? []).map((b) => ({ ...b, scope: b.scope ?? 'category' }))
 }
 
-export async function setBudget(category, amount) {
-  const { error } = await supabase
-    .from('budgets')
-    .upsert({ category, amount }, { onConflict: 'user_id,category' })
+export async function setBudget(category, amount, scope = 'category') {
+  // An account cap cannot be stored without the column, and silently writing it
+  // as a category budget would cap the wrong thing under the same name.
+  if (!hasScope && scope !== 'category') {
+    throw new Error('Run db/migrate-accounts.sql — an account cap needs the scope column.')
+  }
+  const { error } = hasScope
+    ? await supabase
+        .from('budgets')
+        .upsert({ scope, category, amount }, { onConflict: 'user_id,scope,category' })
+    : await supabase.from('budgets').upsert({ category, amount }, { onConflict: 'user_id,category' })
+  if (error?.code === MISSING_COLUMN) {
+    hasScope = false
+    return setBudget(category, amount, scope)
+  }
   if (error) throw error
 }
 
-export async function removeBudget(category) {
-  const { error } = await supabase.from('budgets').delete().eq('category', category)
+export async function removeBudget(category, scope = 'category') {
+  let q = supabase.from('budgets').delete().eq('category', category)
+  if (hasScope) q = q.eq('scope', scope)
+  const { error } = await q
+  if (error?.code === MISSING_COLUMN) {
+    hasScope = false
+    return removeBudget(category, scope)
+  }
   if (error) throw error
 }
 

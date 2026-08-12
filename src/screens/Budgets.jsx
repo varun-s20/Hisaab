@@ -13,9 +13,11 @@ import Skeleton, { HeroSkeleton } from '../components/Skeleton.jsx'
 // "what happened"; this is the one that answers "am I okay".
 
 /** Where you should be by now if the month were spent evenly. */
-const paceOf = (limit, dom, dim) => (limit / dim) * dom
+export const paceOf = (limit, dom, dim) => (limit / dim) * dom
 
-function Bar({ spent, limit, colour, dom, dim }) {
+// Exported for the Accounts screen, which caps an envelope the same way this
+// one caps a category and has to draw the same notch to mean the same thing.
+export function Bar({ spent, limit, colour, dom, dim }) {
   const pct = Math.min(100, (spent / limit) * 100)
   const pace = Math.min(100, (paceOf(limit, dom, dim) / limit) * 100)
   const over = spent > limit
@@ -70,11 +72,16 @@ export default function Budgets({ onBack }) {
       byCat.set(c, (byCat.get(c) ?? 0) + Number(r.amount))
     }
     const total = spendTotal(spend)
-    const list = (budgets ?? [])
+    // Category scope only. A cap set on an envelope shares this table and this
+    // column — see db/schema.sql — so without the scope test "Wants" would show
+    // up here as a category budget measured against category spending, which is
+    // a number about nothing. Accounts owns that half of the screen.
+    const mine = (budgets ?? []).filter((b) => b.scope === 'category')
+    const list = mine
       .filter((b) => b.category !== TOTAL_BUDGET)
       .map((b) => ({ ...b, amount: Number(b.amount), spent: byCat.get(b.category) ?? 0 }))
       .sort((a, b) => b.spent / b.amount - a.spent / a.amount)
-    const overall = (budgets ?? []).find((b) => b.category === TOTAL_BUDGET)
+    const overall = mine.find((b) => b.category === TOTAL_BUDGET)
     return { dim, dom, list, total, overall: overall ? Number(overall.amount) : null }
   }, [budgets, rows])
 
@@ -103,7 +110,7 @@ export default function Budgets({ onBack }) {
     }
   }
 
-  const taken = new Set((budgets ?? []).map((b) => b.category))
+  const taken = new Set((budgets ?? []).filter((b) => b.scope === 'category').map((b) => b.category))
   const free = allCategories().filter((c) => !taken.has(c))
 
   if (!budgets)
@@ -297,7 +304,8 @@ export default function Budgets({ onBack }) {
       <p className="muted" style={{ fontSize: 12, marginTop: 18, lineHeight: 1.6 }}>
         Budgets are monthly and count spending only — transfers, refunds, investments and
         money you lent never touch them. The notch on each bar is where an even spend
-        would put you today.
+        would put you today. To cap a card, a bank or an envelope instead of a category,
+        use Accounts.
       </p>
 
       {editing && (

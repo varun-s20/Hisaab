@@ -47,18 +47,32 @@ function sniff(text) {
 }
 
 // ── Column detection ─────────────────────────────────────────────────────────
-// Every name an Indian bank or UPI app has been seen to use. Resolved in the
-// order listed below, each column claimed once — so "Debit Amount" is taken by
-// `debit` before `amount` ever gets to look at it.
+// Every name an Indian bank or UPI app has been seen to use, plus the ones the
+// budgeting apps use — MyMoney, Money Manager, Wallet, Monefy — because a
+// person arriving with years of history exports it from one of those, not from
+// a bank. A hand-made Google Sheet is the same problem with worse spelling.
+//
+// Resolved in the order listed below, each column claimed once — so "Debit
+// Amount" is taken by `debit` before `amount` ever gets to look at it.
+//
+// `category` and `account` are resolved BEFORE `description`, and that order is
+// load-bearing: description matches 'name' and 'to' by whole-token containment,
+// so listed after them it would claim "Account Name" and leave the real note
+// column unread.
 const NAMES = {
-  date: ['date', 'txn date', 'transaction date', 'value date', 'posting date', 'date time', 'txn date time', 'transaction datetime', 'completion time'],
+  // 'time' is here because MyMoney's only date column is called TIME and holds
+  // "Jul 09, 2026 10:59 AM". A file with separate Date and Time columns is
+  // unaffected: the exact-match pass claims "Date" before containment runs.
+  date: ['date', 'txn date', 'transaction date', 'value date', 'posting date', 'date time', 'txn date time', 'transaction datetime', 'completion time', 'time', 'datetime', 'timestamp'],
   ref: ['ref', 'reference', 'ref no', 'ref number', 'reference no', 'reference number', 'txn ref', 'transaction ref', 'utr', 'utr no', 'transaction id', 'txn id', 'upi transaction id', 'cheque no', 'chq no', 'cheque number', 'ref number cheque number'],
-  type: ['type', 'txn type', 'transaction type', 'dr cr', 'cr dr', 'debit credit'],
+  type: ['type', 'txn type', 'transaction type', 'dr cr', 'cr dr', 'debit credit', 'income expense', 'expense income'],
+  category: ['category', 'category name', 'main category', 'parent category'],
+  account: ['account', 'account name', 'wallet', 'from account', 'to account', 'paid from'],
   debit: ['debit', 'debit amount', 'debit amt', 'withdrawal', 'withdrawal amt', 'withdrawal amount', 'withdrawals', 'dr', 'paid out', 'money out'],
   credit: ['credit', 'credit amount', 'credit amt', 'deposit', 'deposit amt', 'deposit amount', 'deposits', 'cr', 'paid in', 'money in'],
   // No 'value' alias here — it would claim HDFC's "Value Dt" column.
-  amount: ['amount', 'txn amount', 'transaction amount', 'amount inr', 'amount in inr', 'amt'],
-  description: ['description', 'narration', 'particulars', 'details', 'transaction details', 'remarks', 'merchant', 'merchant name', 'payee', 'paid to', 'to', 'from', 'name'],
+  amount: ['amount', 'txn amount', 'transaction amount', 'amount inr', 'amount in inr', 'amt', 'inr', 'cost', 'price', 'spent'],
+  description: ['description', 'narration', 'particulars', 'details', 'transaction details', 'remarks', 'merchant', 'merchant name', 'payee', 'paid to', 'to', 'from', 'name', 'note', 'notes', 'memo', 'comment', 'comments', 'item', 'title', 'subject', 'for'],
 }
 
 const norm = (s) => String(s ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
@@ -79,7 +93,7 @@ function claim(headers, names, used) {
 export function detectColumns(headerRow) {
   const headers = (headerRow ?? []).map(norm)
   const used = new Set()
-  const out = { date: -1, amount: -1, debit: -1, credit: -1, description: -1, ref: -1, type: -1 }
+  const out = { date: -1, amount: -1, debit: -1, credit: -1, description: -1, ref: -1, type: -1, category: -1, account: -1 }
   for (const key of Object.keys(NAMES)) out[key] = claim(headers, NAMES[key], used)
   return out
 }
@@ -96,10 +110,96 @@ function findHeader(table) {
 }
 
 // ── Cell readers ─────────────────────────────────────────────────────────────
+// `income` and `expense` are in here because that is how every budgeting app
+// writes the type column, and neither word matched before: "(+) Income" fell
+// through every branch to the 'debit' default at the end of the chain, so a
+// ₹43,470 salary imported as ₹43,470 spent — wrong in money-out and money-in at
+// the same time, from one row.
 const dirFrom = (s) =>
-  /\b(cr|credit|credited|deposit|received|refund)\b/i.test(s) ? 'credit'
-  : /\b(dr|debit|debited|withdrawal|sent|paid)\b/i.test(s) ? 'debit'
+  /\b(cr|credit|credited|deposit|received|refund|income|earning|earnings)\b/i.test(s) ? 'credit'
+  : /\b(dr|debit|debited|withdrawal|withdrawn|sent|paid|expense|spend|spent)\b/i.test(s) ? 'debit'
   : null
+
+/**
+ * The category to file the row under when the file states its own kind.
+ *
+ * A budgeting app's type column is a fact the row carries about itself, and it
+ * outranks anything guessed from a name — so it is turned into the category the
+ * cascade would have had to reach, and `typeFor` in lib/categorise.js does the
+ * rest: 'Transfers' becomes type `transfer`, 'Income' on a credit becomes type
+ * `income`. Nothing new to consume, and money moving between your own envelopes
+ * stops being counted as spending.
+ *
+ * Deliberately NOT matching 'cr' / 'credit' / 'deposit': those are what a bank
+ * statement puts in the same column, and an unrecognised bank credit is usually
+ * a friend paying you back, not income. That call already belongs to `typeFor`
+ * and this must not quietly overrule it.
+ */
+function statedCategory(cell) {
+  if (!cell) return null
+  if (/\btransfers?\b/i.test(cell)) return 'Transfers'
+  if (/\b(income|salary|earning|earnings)\b/i.test(cell)) return 'Income'
+  return null
+}
+
+/**
+ * Another app's category vocabulary, mapped onto the fourteen this app has.
+ *
+ * Only unambiguous synonyms. Anything not listed passes through unchanged — a
+ * "Gift" or a "DebtPayment" column stays that word rather than being flattened
+ * into Other, because the person spent years filing it that way and the row
+ * carries the text either way. Add it in the picker to give it a colour.
+ */
+const CATEGORY_ALIAS = {
+  food: 'Food & Dining', dining: 'Food & Dining', 'eating out': 'Food & Dining',
+  restaurant: 'Food & Dining', restaurants: 'Food & Dining', 'food drinks': 'Food & Dining',
+  grocery: 'Groceries', supermarket: 'Groceries', vegetables: 'Groceries',
+  transportation: 'Transport', travel: 'Transport', fuel: 'Transport', petrol: 'Transport',
+  taxi: 'Transport', commute: 'Transport',
+  telephone: 'Bills & Utilities', phone: 'Bills & Utilities', mobile: 'Bills & Utilities',
+  utilities: 'Bills & Utilities', bills: 'Bills & Utilities', internet: 'Bills & Utilities',
+  recharge: 'Bills & Utilities', electricity: 'Bills & Utilities',
+  grooming: 'Personal Care', beauty: 'Personal Care', salon: 'Personal Care',
+  social: 'Entertainment', 'social life': 'Entertainment', leisure: 'Entertainment',
+  movies: 'Entertainment', culture: 'Entertainment',
+  electronics: 'Shopping', clothing: 'Shopping', apparel: 'Shopping', clothes: 'Shopping',
+  medical: 'Health', medicine: 'Health', fitness: 'Health', gym: 'Health', doctor: 'Health',
+  salary: 'Income', wage: 'Income', wages: 'Income',
+  housing: 'Rent', accommodation: 'Rent',
+  study: 'Education', tuition: 'Education',
+  transfer: 'Transfers', 'self transfer': 'Transfers',
+}
+
+/**
+ * An account cell, split into the pocket the money left and the one it landed
+ * in. A budgeting app writes both sides of a transfer into one cell —
+ * "SBI Bank->Needs" — and left whole that string becomes its own account: it
+ * shows in the picker, in "group by account", and in a balance for an envelope
+ * that does not exist.
+ *
+ * Split on the first arrow only. An account name may legitimately contain a
+ * hyphen; the separator is always the pair.
+ */
+function readAccount(raw) {
+  const s = String(raw ?? '').replace(/\s+/g, ' ').trim()
+  if (!s) return { account: null, to_account: null }
+  const at = s.indexOf('->')
+  if (at < 0) return { account: s.slice(0, 40), to_account: null }
+  return {
+    account: s.slice(0, at).trim().slice(0, 40) || null,
+    to_account: s.slice(at + 2).trim().slice(0, 40) || null,
+  }
+}
+
+/**
+ * A category cell as this app spells it. MyMoney writes "  -  " on a transfer,
+ * where the field means "not applicable" rather than a category called dash.
+ */
+function readCategory(raw) {
+  const s = String(raw ?? '').replace(/\s+/g, ' ').trim()
+  if (!s || /^[-–—.]+$/.test(s)) return null
+  return CATEGORY_ALIAS[s.toLowerCase()] ?? s.slice(0, 28)
+}
 
 /**
  * "₹1,00,000.50 Dr" → { value: 100000.5, dir: 'debit' }.
@@ -176,17 +276,41 @@ export function parseStatement(text, { now = new Date() } = {}) {
     const hit = debit ?? credit ?? single
     if (!hit) { drop('No readable amount'); continue }
 
-    const payee_raw = at('description').replace(/\s+/g, ' ') || null
-    const method = payee_raw?.match(METHOD)?.[1]?.toUpperCase() ?? null
-    const confidence = payee_raw ? 1.0 : 0.65
+    const direction = debit ? 'debit' : credit ? 'credit' : (single.dir ?? dirFrom(at('type')) ?? 'debit')
+    const { account, to_account } = readAccount(at('account'))
+
+    // A budgeting app's own word for the row wins; otherwise its category
+    // column, mapped onto ours. Either way this is `category_hint`, which the
+    // cascade in lib/categorise.js already reads at tier 2 — above the seed
+    // rules and above the personal-name check, and below a correction the user
+    // made themselves. Nothing there needed changing.
+    const category_hint = statedCategory(at('type')) ?? readCategory(at('category'))
+
+    // Fall back rather than lose the row. A note column is often blank on the
+    // rows a person entered in a hurry, and `db.saveTransactions` drops
+    // anything with no payee at all — so an amount, a date and a category would
+    // have been thrown away for want of a name. The category, then the account,
+    // are the next most descriptive things the row has.
+    const described = at('description').replace(/\s+/g, ' ') || null
+    // A transfer with no note reads best as where it went, not where it came
+    // from: "Needs" over "SBI Bank" on a row that says SBI Bank → Needs.
+    const payee_raw = described ?? category_hint ?? to_account ?? account
+    const method = described?.match(METHOD)?.[1]?.toUpperCase() ?? null
+    // Only a row with nothing to call it at all is worth a look. A named
+    // category is a perfectly good label — flagging all of them would put a
+    // whole imported year into "Needs a look" and make the queue useless.
+    const confidence = described ? 1.0 : payee_raw ? 0.8 : 0.65
 
     rows.push({
       txn_ref: at('ref') || null, // null → db.forInsert synthesises a stable one
       txn_date,
       txn_time: extractTime(at('date')),
       amount: hit.value,
-      direction: debit ? 'debit' : credit ? 'credit' : (single.dir ?? dirFrom(at('type')) ?? 'debit'),
+      direction,
       payee_raw,
+      category_hint,
+      account,
+      to_account,
       method,
       source: 'statement',
       confidence,

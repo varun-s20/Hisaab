@@ -11,4 +11,11 @@ dist-ssr
 screenshots/*
 !screenshots/README.md
 
+# Same rule for sample exports. ref/ holds a real ledger — every amount, every
+# note, every account name — kept to test the importer against the shape of an
+# actual file rather than an imagined one. The shape is worth committing; the
+# money is not, so scripts/test-parse.mjs carries an invented copy instead.
+ref/*
+!ref/README.md
+
 .DS_Store

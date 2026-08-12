@@ -1,3 +1,25 @@
+# ── Security headers ───────────────────────────────────────────────────────
+# frame-ancestors is here and not only in the <meta> CSP in index.html, because
+# a browser *ignores* frame-ancestors when it arrives in a meta tag — it is one
+# of the directives that must come over HTTP. So the app carried a rule that
+# read as protection and did nothing, and anyone could put it in an iframe and
+# steer a signed-in person into taps they could not see: Delete on a row, Merge
+# on an account, Sign out. X-Frame-Options says the same thing to anything old
+# enough not to read CSP.
+#
+# The meta CSP still does everything else; a second policy over HTTP is
+# enforced alongside it rather than replacing it, so only the directive that
+# was broken is repeated here.
+#
+# no-referrer is the privacy one. Without it every request for the webfonts
+# below sends Google the page you were on.
+/*
+  Content-Security-Policy: frame-ancestors 'none'
+  X-Frame-Options: DENY
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: no-referrer
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), usb=()
+
 # Read by Cloudflare Workers static assets. Only the four files that decide
 # *which version of the app you get* are listed — everything with real weight
 # (/assets/* and /tesseract/*) has a hashed or immutable name and keeps its

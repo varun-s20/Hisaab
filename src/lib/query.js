@@ -14,7 +14,7 @@ import { TYPES, allCategories } from './categories.js'
 //                 fails soft; this does too.
 
 const ISO = /^\d{4}-\d{2}-\d{2}$/
-const GROUPS = ['category', 'merchant', 'method', 'day']
+const GROUPS = ['category', 'merchant', 'method', 'account', 'day']
 
 // A factory, not a shared constant. `{ ...EMPTY }` is a shallow copy, so
 // guess() was pushing categories and methods into arrays that belonged to the
@@ -27,6 +27,11 @@ const empty = () => ({
   categories: [],
   types: [],
   methods: [],
+  // Which card, bank or envelope it came out of. A separate axis from `methods`
+  // on purpose: the method is the rail the money travelled (gpay, NEFT, cash),
+  // the account is the pocket it left. "Which app did I pay with" and "how much
+  // is left in Needs" are different questions and people ask both.
+  accounts: [],
   merchant: null,
   minAmount: null,
   maxAmount: null,
@@ -53,15 +58,16 @@ const date = (v) => {
   return real.getFullYear() === y && real.getMonth() === m - 1 && real.getDate() === d ? v : null
 }
 
-/** A category or method name is user-supplied text, not a pattern. */
+/** A category, method or account name is user-supplied text, not a pattern. */
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
 /** Snap a model-supplied spec onto values this app actually has. */
-export function sanitise(raw, { methods = [] } = {}) {
+export function sanitise(raw, { methods = [], accounts = [] } = {}) {
   if (!raw || typeof raw !== 'object') return null
 
   const cats = new Set(allCategories())
   const meths = new Set(methods)
+  const accs = new Set(accounts)
   const pick = (v, allowed) =>
     Array.isArray(v) ? [...new Set(v.filter((x) => typeof x === 'string' && allowed.has(x)))] : []
 
@@ -76,6 +82,7 @@ export function sanitise(raw, { methods = [] } = {}) {
     categories: pick(raw.categories, cats),
     types: pick(raw.types, new Set(TYPES)),
     methods: pick(raw.methods, meths),
+    accounts: pick(raw.accounts, accs),
     merchant: typeof raw.merchant === 'string' && raw.merchant.trim() ? raw.merchant.trim().slice(0, 60) : null,
     minAmount: num(raw.minAmount),
     maxAmount: num(raw.maxAmount),
@@ -154,6 +161,10 @@ const NOT_A_MERCHANT = new Set([
 ])
 
 const GROUP_WORDS = [
+  // Account before method. "Which card did I pay with" is a question about the
+  // card, not about the rail it rode — answered by method it comes back
+  // grouped under "card", which is one row and no answer at all.
+  [/\bwhich account|what account|which card|what card|which bank|which envelope|envelope|per account\b/, 'account'],
   [/\bwhich app|what app|payment method|platform|gpay|phonepe|paytm|upi|cash\b/, 'method'],
   [/\bwho|merchant|where did i (spend|pay)|shop\b/, 'merchant'],
   [/\bcategor|what did i spend (it )?on|where did (my|the) money\b/, 'category'],
@@ -165,7 +176,7 @@ const GROUP_WORDS = [
  * ambition. Used when the model is unreachable — and as the reason Ask is not
  * a dead screen offline.
  */
-export function guess(question, { methods = [] } = {}) {
+export function guess(question, { methods = [], accounts = [] } = {}) {
   const q = ` ${question.toLowerCase()} `
   const spec = empty()
   let rest = q
@@ -194,6 +205,15 @@ export function guess(question, { methods = [] } = {}) {
     if (q.includes(m.toLowerCase())) {
       spec.methods.push(m)
       rest = rest.replace(new RegExp(escapeRe(m), 'gi'), ' ')
+    }
+  }
+
+  // Longest first, so "SBI Bank" is matched as one account rather than leaving
+  // "Bank" behind to be read as a merchant name.
+  for (const a of [...accounts].sort((x, y) => y.length - x.length)) {
+    if (a.length >= 3 && q.includes(a.toLowerCase())) {
+      spec.accounts.push(a)
+      rest = rest.replace(new RegExp(escapeRe(a), 'gi'), ' ')
     }
   }
 
@@ -237,6 +257,7 @@ export function applySpec(rows, spec) {
     if (spec.types.length && !spec.types.includes(r.type)) return false
     if (spec.categories.length && !spec.categories.includes(r.category)) return false
     if (spec.methods.length && !spec.methods.includes(r.method)) return false
+    if (spec.accounts.length && !spec.accounts.includes(r.account)) return false
     if (spec.minAmount != null && Number(r.amount) < spec.minAmount) return false
     if (spec.maxAmount != null && Number(r.amount) > spec.maxAmount) return false
     if (needle) {
@@ -251,6 +272,7 @@ const KEY = {
   category: (r) => r.category ?? 'Other',
   merchant: (r) => r.payee_clean || r.payee_raw || 'Unknown',
   method: (r) => r.method ?? 'Not recorded',
+  account: (r) => r.account ?? 'Not recorded',
   day: (r) => r.txn_date,
 }
 
@@ -300,6 +322,7 @@ export function describe(spec, methods) {
   const bits = []
   if (spec.categories.length) bits.push(spec.categories.join(', '))
   if (spec.methods.length) bits.push(`via ${spec.methods.join(', ')}`)
+  if (spec.accounts.length) bits.push(`from ${spec.accounts.join(', ')}`)
   if (spec.merchant) bits.push(`matching “${spec.merchant}”`)
   if (spec.types.length === 1) bits.push(spec.types[0])
   if (spec.minAmount != null) bits.push(`over ₹${spec.minAmount}`)
