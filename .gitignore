@@ -2,6 +2,7 @@ node_modules
 dist
 dist-ssr
 .vercel
+.wrangler
 .env
 .env.local
 *.local

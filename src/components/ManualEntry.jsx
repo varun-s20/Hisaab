@@ -3,6 +3,7 @@ import { saveTransactions } from '../lib/db'
 import { learn } from '../lib/categorise'
 import { today } from '../lib/format'
 import CategoryPicker from './CategoryPicker.jsx'
+import DateField from './DateField.jsx'
 import Sheet, { EXIT } from './Sheet.jsx'
 
 // The only place manual typing is acceptable: cash, which leaves no screenshot.
@@ -104,10 +105,7 @@ export default function ManualEntry({ open, onClose, onSaved }) {
           />
         </label>
         <CategoryPicker value={category} onChange={setCategory} />
-        <label className="field">
-          <span>Date</span>
-          <input type="date" value={date} max={today()} onChange={(e) => setDate(e.target.value)} />
-        </label>
+        <DateField value={date} max={today()} onChange={setDate} />
         <label className="field">
           <span>Note (optional)</span>
           <input

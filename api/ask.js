@@ -10,7 +10,8 @@
 
 import { requireUser } from './_auth.js'
 
-const MODEL = process.env.GEMINI_MODEL || 'gemini-flash-lite-latest'
+// Lazy: on Cloudflare the bindings are only there once a request is in flight.
+const model = () => process.env.GEMINI_MODEL || 'gemini-flash-lite-latest'
 
 const ISO = /^\d{4}-\d{2}-\d{2}$/
 
@@ -69,9 +70,10 @@ Return ONLY this JSON object, no markdown fences, no commentary:
 
 Rules:
 - Only use category names from the list above, spelled exactly. Empty array means all.
-- "types" may only contain: expense, income, transfer, refund, lent, repaid.
+- "types" may only contain: expense, income, investment, transfer, refund, lent, repaid.
   Spending questions use ["expense"]. Money-received questions use ["income","refund","repaid"].
-  Questions about a specific merchant or "all transactions" use [].
+  SIP / mutual fund / "what did I invest" questions use ["investment"].
+  Questions about a specific merchant, "my biggest transaction", or "all transactions" use [].
 - Only use method names from the list above. These are the apps or rails a payment
   went through (gpay, phonepe, paytm, cash, UPI, NEFT...).
 - If no period is stated, leave from and to null — that means all of time.
@@ -83,6 +85,7 @@ Rules:
 
 Question: ${JSON.stringify(question)}`
 
+  const MODEL = model()
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${process.env.GEMINI_API_KEY}`
 
   try {

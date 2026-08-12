@@ -4,12 +4,15 @@ import { parseScreenshot } from '../lib/parse'
 import { categoriseBatch, persistAILearnings, learn } from '../lib/categorise'
 import { saveTransactions, listTransactions, updateTransaction, listBudgets, TOTAL_BUDGET } from '../lib/db'
 import { money, iso, today, dayLabel, timeLabel, spendTotal, startOfMonth, daysInMonth } from '../lib/format'
-import { TYPES } from '../lib/categories'
+import { TYPE_OPTIONS } from '../lib/categories'
 import CategoryIcon from '../components/CategoryIcon.jsx'
 import CategoryPicker from '../components/CategoryPicker.jsx'
+import Select from '../components/Select.jsx'
 import EditSheet from '../components/EditSheet.jsx'
 import Amount from '../components/Amount.jsx'
 import ManualEntry from '../components/ManualEntry.jsx'
+import NotifyPrompt from '../components/NotifyPrompt.jsx'
+import { HeroSkeleton, RowsSkeleton, Bar } from '../components/Skeleton.jsx'
 import { takeSharedFiles } from '../lib/share'
 
 // Home. One sentence about the week, one number for today, one place to drop a
@@ -47,6 +50,10 @@ export default function Today({ onChange, reviewCount, goReview }) {
   // second batch arriving mid-read would read a stale `false` and start anyway.
   const reading = useRef(false)
   const [rows, setRows] = useState([]) // last 14 days, for the week sentence
+  // [] is both "still fetching" and "genuinely nothing", and the screen was
+  // showing the second — "You've spent ₹0 this week", "Nothing logged today" —
+  // while the first was still true.
+  const [loaded, setLoaded] = useState(false)
   const [busy, setBusy] = useState(null) // { done, total, stage }
   const [nudge, setNudge] = useState('') // said once, while the read is running
   const [result, setResult] = useState(null)
@@ -62,11 +69,15 @@ export default function Today({ onChange, reviewCount, goReview }) {
     const from = [daysAgo(13), startOfMonth()].sort()[0]
     const r = await listTransactions({ from, to: today(), limit: 1000 })
     setRows(r)
+    setLoaded(true)
     return r
   }, [])
 
   useEffect(() => {
-    load().catch(() => {})
+    // Even a failed load stops the placeholders: the screen is still usable —
+    // you can drop a screenshot into it — and a skeleton that never resolves is
+    // worse than a real zero.
+    load().catch(() => setLoaded(true))
     listBudgets()
       .then((b) => setBudget(b.find((x) => x.category === TOTAL_BUDGET) ?? null))
       .catch(() => {})
@@ -116,7 +127,10 @@ export default function Today({ onChange, reviewCount, goReview }) {
         setBusy({ done: files.length, total: files.length, stage: 'sorting' })
 
         // One history screenshot carries ~7 transactions, a receipt carries one.
-        const parsed = texts.flatMap((t) => parseScreenshot(t.text))
+        // Dated against when the shot was taken, not when it was dropped here:
+        // "Paid Today" on a Tuesday screenshot means Tuesday however long it
+        // sat in the gallery. See takenAt() in lib/ocr.js.
+        const parsed = texts.flatMap((t) => parseScreenshot(t.text, t.when))
 
         const categorised = await categoriseBatch(parsed)
         setPending(categorised) // held from here on; a save that lands clears it
@@ -216,34 +230,49 @@ export default function Today({ onChange, reviewCount, goReview }) {
       <div className="stagger">
         <p className="eyebrow">{HEADER.format(new Date())}</p>
 
-        <h1 className="lede">
-          {d.lede ?? (
-            <>
-              You&rsquo;ve spent <Rs n={d.week} /> this week.{' '}
-              {d.tail && <span className="dim">{d.tail}</span>}
-            </>
-          )}
-        </h1>
+        {loaded ? (
+          <h1 className="lede">
+            {d.lede ?? (
+              <>
+                You&rsquo;ve spent <Rs n={d.week} /> this week.{' '}
+                {d.tail && <span className="dim">{d.tail}</span>}
+              </>
+            )}
+          </h1>
+        ) : (
+          <h1 className="lede" aria-label="Loading your week">
+            <Bar w="92%" h={22} />
+            <Bar w="58%" h={22} style={{ marginTop: 9 }} />
+          </h1>
+        )}
 
-        <div className="brand">
-          {/* "logged", not "spent" — ₹0 means nothing was entered, which is not
-              the same claim as having spent nothing. */}
-          <p className="caption">Logged today</p>
-          <Amount value={d.todayTotal} className="amount" />
-          <hr />
-          <div className="foot">
-            <div>
-              <span className="k">Last 7 days</span>
-              <b className="num">₹{money(d.week)}</b>
-            </div>
-            <div>
-              <span className="k">Daily average</span>
-              <b className="num">₹{money(d.week / 7)}</b>
+        {loaded ? (
+          <div className="brand">
+            {/* "logged", not "spent" — ₹0 means nothing was entered, which is not
+                the same claim as having spent nothing. */}
+            <p className="caption">Logged today</p>
+            <Amount value={d.todayTotal} className="amount" />
+            <hr />
+            <div className="foot">
+              <div>
+                <span className="k">Last 7 days</span>
+                <b className="num">₹{money(d.week)}</b>
+              </div>
+              <div>
+                <span className="k">Daily average</span>
+                <b className="num">₹{money(d.week / 7)}</b>
+              </div>
             </div>
           </div>
-        </div>
+        ) : (
+          <HeroSkeleton />
+        )}
 
         {budget && <BudgetLine limit={Number(budget.amount)} spent={d.month} daysLeft={d.daysLeft} />}
+
+        {/* Renders nothing once it has been answered, or where the browser has
+            already decided. */}
+        <NotifyPrompt />
 
         {shared && (
           <SharedFiles
@@ -337,7 +366,9 @@ export default function Today({ onChange, reviewCount, goReview }) {
       )}
 
       <h2 className="section">{dayLabel(today())}</h2>
-      {d.todays.length === 0 ? (
+      {!loaded ? (
+        <RowsSkeleton rows={2} />
+      ) : d.todays.length === 0 ? (
         <div className="card">
           <p className="empty">Nothing logged today.</p>
         </div>
@@ -563,14 +594,13 @@ function QuickEdit({ r, onDone, onEdit }) {
         value={r.category ?? ''}
         onChange={(c) => c && set({ category: c }, true)}
       />
-      <label className="field">
-        <span>Type — transfers never count as spending</span>
-        <select disabled={saving} value={r.type} onChange={(e) => set({ type: e.target.value })}>
-          {TYPES.map((t) => (
-            <option key={t} value={t}>{t}</option>
-          ))}
-        </select>
-      </label>
+      <Select
+        label="Type"
+        disabled={saving}
+        value={r.type}
+        options={TYPE_OPTIONS}
+        onChange={(t) => set({ type: t })}
+      />
       <button type="button" className="btn ghost small" onClick={onEdit}>
         Edit details
       </button>

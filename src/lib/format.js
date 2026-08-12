@@ -50,3 +50,8 @@ export const earnTotal = (rows) =>
     (s, r) => (r.type === 'income' || r.type === 'refund' || r.type === 'repaid' ? s + Number(r.amount) : s),
     0,
   )
+
+/** Money put away rather than spent. Its own total, because an SIP is neither
+ *  a cost nor an earning and folding it into either makes both wrong. */
+export const investTotal = (rows) =>
+  rows.reduce((s, r) => (r.type === 'investment' ? s + Number(r.amount) : s), 0)

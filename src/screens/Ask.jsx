@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { listTransactions, listMethods } from '../lib/db'
-import { money, dayLabel, spendTotal, earnTotal } from '../lib/format'
+import { money, dayLabel, spendTotal, earnTotal, investTotal } from '../lib/format'
 import { postJson } from '../lib/api'
 import { allCategories, colorFor } from '../lib/categories'
 import { sanitise, guess, applySpec, group, describe } from '../lib/query'
 import ScreenHeader from '../components/ScreenHeader.jsx'
 import Amount from '../components/Amount.jsx'
+import { Bar, HeroSkeleton, RowsSkeleton } from '../components/Skeleton.jsx'
 import { Row } from './Today.jsx'
 
 // "What did I spend on food last month?" — the one place a second model call
@@ -113,15 +114,19 @@ export default function Ask({ onBack }) {
     // plus a ₹50,000 salary rendered ₹80,000 in the largest type on the screen.
     const out = spendTotal(rows)
     const inn = earnTotal(rows)
-    const mixed = out > 0 && inn > 0
-    const total = mixed ? out : out || inn
+    const put = investTotal(rows)
+    const mixed = [out, inn, put].filter((n) => n > 0).length > 1
+    // Whichever single kind the answer is about. A question that matched only
+    // transfers has no total in any of the three — say the row count instead of
+    // printing a confident ₹0 over rows that plainly exist.
+    const total = out || inn || put
     const groups = group(rows, spec.groupBy)
     const max = Math.max(1, ...groups.map((g) => g.total))
     const sorted =
       spec.sort === 'amount'
         ? [...rows].sort((a, b) => Number(b.amount) - Number(a.amount))
         : rows
-    return { total, out, inn, mixed, groups, max, sorted }
+    return { total, out, inn, put, mixed, groups, max, sorted }
   }, [result])
 
   return (
@@ -176,6 +181,16 @@ export default function Ask({ onBack }) {
         </>
       )}
 
+      {/* Two round trips — the model, then the ledger — behind a spinner the
+          size of a stamp. Draw the answer that is coming instead. */}
+      {busy && (
+        <div role="status" aria-label="Working it out">
+          <Bar w="64%" h={12} style={{ margin: '2px 0 10px' }} />
+          <HeroSkeleton />
+          <RowsSkeleton rows={3} head />
+        </div>
+      )}
+
       {err && <p className="alert" style={{ fontSize: 14 }}>{err}</p>}
 
       {result && view && (
@@ -191,10 +206,16 @@ export default function Ask({ onBack }) {
             <Amount value={view.total} className="amount" />
             <hr />
             <div className="foot">
-              {view.mixed && (
+              {view.mixed && view.inn > 0 && (
                 <div>
                   <span className="k">Money in</span>
                   <b className="num" style={{ fontSize: 13, fontWeight: 600 }}>₹{money(view.inn)}</b>
+                </div>
+              )}
+              {view.mixed && view.put > 0 && (
+                <div>
+                  <span className="k">Invested</span>
+                  <b className="num" style={{ fontSize: 13, fontWeight: 600 }}>₹{money(view.put)}</b>
                 </div>
               )}
               <div>
@@ -207,6 +228,16 @@ export default function Ask({ onBack }) {
           {result.local && (
             <p className="muted" style={{ fontSize: 12.5, margin: 0 }}>
               Read on this device — the assistant was unreachable, so this is a rough match.
+            </p>
+          )}
+
+          {/* A ₹0 over a list of real rows is the app looking broken. It isn't:
+              transfers and money lent are in no total by design, and saying so
+              is cheaper than making the reader work it out. */}
+          {view.total === 0 && result.rows.length > 0 && (
+            <p className="muted" style={{ fontSize: 12.5, margin: 0 }}>
+              These are transfers — your own money moving between accounts, so they add
+              to no total. Change a row&rsquo;s type if one of them was really a payment.
             </p>
           )}
 

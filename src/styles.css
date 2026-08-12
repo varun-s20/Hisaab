@@ -58,6 +58,8 @@
   /* recharts needs a literal, not a var(). Insights reads these off :root. */
   --chart-line: #163300;
   --chart-ghost: #9a9c98;
+  /* The sweep across a loading placeholder. */
+  --sheen: rgba(255, 255, 255, 0.65);
 
   --shadow-card: 0 1px 2px rgba(14, 15, 12, 0.04), 0 6px 16px -6px rgba(14, 15, 12, 0.08);
   --shadow-lift: 0 2px 4px rgba(14, 15, 12, 0.05), 0 14px 30px -12px rgba(14, 15, 12, 0.16);
@@ -85,6 +87,7 @@
   --in: #9fe870;
   --chart-line: #9fe870;
   --chart-ghost: #8a8f87;
+  --sheen: rgba(255, 255, 255, 0.07);
   --shadow-card: none;
   --shadow-lift: none;
   color-scheme: dark;
@@ -169,16 +172,58 @@ input, textarea, select { -webkit-user-select: auto; user-select: auto; }
 .app {
   display: flex;
   flex-direction: column;
+  /* svh, not %. A percentage resolves against the initial containing block,
+     which mobile Chrome sizes to the viewport with the URL bar *hidden* — so
+     the shell was always a URL-bar taller than the visible page and Today
+     scrolled by an inch with nothing below the fold. svh is the smallest
+     viewport, which is the one guarantee that "content fits" means "no
+     scrollbar". % stays as the fallback for anything without svh. */
   min-height: 100%;
+  min-height: 100svh;
   max-width: 540px;
   margin: 0 auto;
-  padding-bottom: calc(84px + env(safe-area-inset-bottom));
+  /* The nav is ~58px + inset. 84 left 26px of clearance and the screen below
+     added 28 more, so every page carried half a thumb of dead space it could
+     be scrolled into. */
+  padding-bottom: calc(72px + env(safe-area-inset-bottom));
 }
 
 .screen {
   flex: 1;
-  padding: calc(env(safe-area-inset-top) + 20px) var(--pad) 28px;
+  padding: calc(env(safe-area-inset-top) + 20px) var(--pad) 12px;
+  /* Every screen is remounted on a tab change (App's ScreenBoundary is keyed by
+     tab), so this replays as the page transition.
+     Opacity only, never a transform: .screen contains the sheets and toasts,
+     which are position:fixed, and a transformed ancestor makes itself their
+     containing block — a scrim anchored to the screen instead of the viewport
+     is a nasty thing to find months later. The children below carry the
+     movement instead, and they end on transform:none. */
+  animation: fadein 190ms var(--ease-out);
 }
+
+@keyframes fadein {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* Screens that don't orchestrate their own reveal get a light one, so moving
+   between tabs reads as one motion rather than four different ones.
+   .toast is excluded and must stay excluded: it is position:fixed, it is
+   inserted long after mount, and `rise`'s `transform: none` would cancel its
+   own translateX(-50%) mid-flight. .sheet-root portals to <body> now (see
+   Sheet.jsx) so it never matches this anyway — it stays named here so that
+   un-portalling a sheet doesn't silently reintroduce the same fault.
+   Capped at the first five children on purpose: past that a screen is a list,
+   and a list re-renders as you type in the search box — every filtered day
+   card would replay the entrance on every keystroke. The header block is
+   stable, so it is the part worth moving. */
+.screen > :not(.stagger, .toast, .sheet-root):nth-child(-n + 5) {
+  animation: rise 320ms var(--ease-out) backwards;
+}
+.screen > :not(.stagger, .toast, .sheet-root):nth-child(2) { animation-delay: 40ms; }
+.screen > :not(.stagger, .toast, .sheet-root):nth-child(3) { animation-delay: 75ms; }
+.screen > :not(.stagger, .toast, .sheet-root):nth-child(4) { animation-delay: 105ms; }
+.screen > :not(.stagger, .toast, .sheet-root):nth-child(5) { animation-delay: 130ms; }
 
 /* One orchestrated page reveal. Keyframes are correct here — a page mount is
    not re-triggered mid-flight, so there is nothing to interrupt. */
@@ -270,7 +315,24 @@ h2.section {
   border-top: 1px solid var(--rule);
   z-index: 20;
 }
+/* The moving part. Forest, not bright — the bright-green panel is the loudest
+   thing on the screen and a second bright-green block at the bottom fights it.
+   Transform and width, so it slides and stretches between two labels of
+   different lengths instead of jumping. */
+.navpill {
+  position: absolute;
+  left: 0;
+  background: var(--forest-green);
+  border-radius: var(--radius-pill);
+  pointer-events: none;
+  z-index: 0;
+}
+.navpill[data-placed='true'] {
+  transition: transform 320ms var(--ease-out), width 320ms var(--ease-out);
+}
 .nav button {
+  position: relative;
+  z-index: 1;
   flex: 1;
   max-width: 124px;
   background: none;
@@ -280,16 +342,14 @@ h2.section {
   font-weight: 500;
   color: var(--muted);
   border-radius: var(--radius-pill);
-  /* Named properties only — `all` would sweep in layout-triggering ones. */
-  transition: color 180ms var(--ease-out), background-color 180ms var(--ease-out),
-    transform 140ms var(--ease-out);
+  /* Named properties only — `all` would sweep in layout-triggering ones.
+     The colour lags the pill slightly so the label lights up as the pill
+     arrives under it rather than before it has left the last one. */
+  transition: color 220ms var(--ease-out) 60ms, transform 140ms var(--ease-out);
 }
 .nav button:active { transform: scale(0.95); }
-/* Forest, not bright — the bright-green panel is the loudest thing on the
-   screen and a second bright-green block at the bottom fights it. */
 .nav button[aria-current='true'] {
   color: var(--bright-green);
-  background: var(--forest-green);
   font-weight: 600;
 }
 .nav .badge {
@@ -441,6 +501,10 @@ h2.section {
     border-color 180ms var(--ease-out), transform 140ms var(--ease-out);
 }
 .chips button:active { transform: scale(0.96); }
+/* A view with nothing in it is still worth showing, greyed — it says the
+   category exists and is empty, which is a different fact from absent. */
+.chips button:disabled { opacity: 0.4; cursor: default; }
+.chips button:disabled:active { transform: none; }
 .chips button[aria-selected='true'] {
   background: var(--forest-green);
   border-color: var(--forest-green);
@@ -808,6 +872,21 @@ h2.section {
   font-size: 12.5px;
   color: var(--muted);
   margin-top: 6px;
+}
+/* Edit sits next to Remove, so it must not push the category name out of the
+   row on a narrow phone. */
+.budgetrow-top .btn.small { padding: 5px 12px; font-size: 12.5px; flex: none; }
+
+/* Controls under the hero figure, inside the green panel. The panel's own
+   content colour is the light one, so a ghost button has to be re-tinted or it
+   is a white pill nobody can read. */
+.brand-actions { margin-top: 14px; }
+.brand-actions p { font-size: 13.5px; margin: 0 0 10px; opacity: 0.8; }
+.brand-actions .danger-actions { justify-content: flex-start; }
+.brand-actions .btn.ghost {
+  border-color: color-mix(in srgb, currentColor 32%, transparent);
+  color: inherit;
+  background: none;
 }
 .warn { color: var(--warning); }
 
@@ -1278,12 +1357,20 @@ button.row:active { transform: scale(0.985); }
 .tile.sm { width: 32px; height: 32px; border-radius: 9px; }
 .tile.sm svg { width: 16px; height: 16px; }
 /* Solid, not dashed. A dashed 32px square inside a solid-bordered picker read as
-   a rendering fault rather than as "nothing chosen yet". */
-.tile.empty { background: var(--neutral); border: 1px solid var(--rule); }
+   a rendering fault rather than as "nothing chosen yet".
+   Named `blank`, because `.empty` is the global empty-state paragraph rule —
+   `padding: 40px 0` — and this span was picking it up, which is what made the
+   whole category control twice the height of the inputs around it. */
+.tile.blank { background: var(--neutral); border: 1px solid var(--rule); }
 
 .catgrid { display: grid; gap: 2px; }
 .catcell { position: relative; }
-.catcell > button {
+/* Scoped to .catrow, never to "any button in here". The old `.catcell > button`
+   also matched .catdel below and beat its own width:40px on specificity, so the
+   remove control was stretched across the entire row with its ✕ sitting in the
+   38px icon column. Selecting a custom category was therefore impossible — the
+   tap always landed on remove. */
+.catrow {
   display: grid;
   grid-template-columns: 38px 1fr auto;
   align-items: center;
@@ -1299,21 +1386,25 @@ button.row:active { transform: scale(0.985); }
   font-weight: 500;
   transition: background-color 160ms var(--ease-out), transform 140ms var(--ease-out);
 }
-.catcell > button:active { transform: scale(0.985); }
-.catcell > button[data-selected='true'] { background: var(--neutral); font-weight: 600; }
+/* Room for the remove control, so a long name never runs under it. */
+.catrow[data-removable='true'] { padding-right: 52px; }
+.catrow:active { transform: scale(0.985); }
+.catrow[data-selected='true'] { background: var(--neutral); font-weight: 600; }
 .catcell .tick { width: 19px; height: 19px; color: var(--forest-green); }
 :root[data-theme='dark'] .catcell .tick { color: var(--bright-green); }
-/* 40px, not the 30px this used to be: it is the one destructive control in the
-   picker and it sits a thumb-width from the row that selects a category. */
+/* 36px and hard against the right edge: it is the one destructive control in
+   the picker, so it stays a thumb-width from the row that selects a category
+   and never overlaps it. */
 .catdel {
   position: absolute;
-  right: 6px;
+  right: 8px;
   top: 50%;
   transform: translateY(-50%);
   display: grid;
   place-items: center;
-  width: 40px;
-  height: 40px;
+  width: 36px;
+  height: 36px;
+  padding: 0;
   border: 0;
   border-radius: 50%;
   background: var(--neutral);
@@ -1321,25 +1412,145 @@ button.row:active { transform: scale(0.985); }
   transition: color 160ms var(--ease-out), background-color 160ms var(--ease-out);
 }
 .catdel svg { width: 15px; height: 15px; }
-.catdel:active { color: var(--negative); }
+.catdel:active { color: var(--negative); background: var(--neutral-hover); }
 /* The confirm takes over the row it belongs to, so it keeps the row's padding
    instead of .confirmnote's bottom margin. */
 .catcell .confirmnote { margin: 0; padding: 8px 10px 10px; }
 
+/* A picker with no icon tile — Select and DateField. Same box as an input, so a
+   form is one column of identical controls whether the field is typed or
+   chosen. */
+/* 14px matches the inputs' own padding, so a Select and a text field beside it
+   are the same height to the pixel. */
+.picker.bare { padding: 14px 15px; gap: 10px; }
+/* 1.55 so the box lands on the same height as a text input, which sets its own
+   from the 16px body size. In EditSheet a DateField and a time input sit in one
+   .pair — two pixels apart is visible when they are side by side. */
+.picker.bare .picker-label { font-size: 15px; font-weight: 400; line-height: 1.55; }
+.picker-cal { width: 19px; height: 19px; flex: none; color: var(--muted); }
+.catrow.bare { grid-template-columns: 1fr auto; padding: 12px 10px; }
+.opt { min-width: 0; }
+.opt .nm { display: block; }
+.opt .sub { display: block; font-size: 12.5px; font-weight: 400; color: var(--muted); margin-top: 2px; }
+
+/* ── Calendar ────────────────────────────────────────────────────────────── */
+.cal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.cal-month {
+  font-family: var(--display);
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+.cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+.cal-wd {
+  display: grid;
+  place-items: center;
+  height: 26px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.cal-day {
+  aspect-ratio: 1;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  color: inherit;
+  font-size: 14.5px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  transition: background-color 160ms var(--ease-out), color 160ms var(--ease-out),
+    transform 140ms var(--ease-out);
+}
+.cal-day:active:not(:disabled) { transform: scale(0.9); }
+.cal-day:disabled { opacity: 0.28; }
+@media (hover: hover) and (pointer: fine) {
+  .cal-day:hover:not(:disabled) { background: var(--neutral); }
+}
+/* Today is a ring, the selection is a fill — so "today" stays readable on a day
+   that is also the one you picked. */
+.cal-day[data-today='true'] { box-shadow: inset 0 0 0 1.5px var(--rule-strong); font-weight: 700; }
+.cal-day[data-selected='true'] {
+  background: var(--forest-green);
+  color: var(--bright-green);
+  font-weight: 700;
+  box-shadow: none;
+}
+.cal-quick {
+  display: flex;
+  gap: 10px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--rule);
+}
+
 .newcat { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--rule); }
+.newcat-preview {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  margin-bottom: 16px;
+  border-radius: var(--radius-sm);
+  background: var(--sunken);
+}
+.newcat-preview .nm { font-size: 15px; font-weight: 600; }
 .field-label { display: block; font-size: 13px; font-weight: 500; color: var(--muted); margin-bottom: 8px; }
 .swatches { display: grid; grid-template-columns: repeat(8, 1fr); gap: 8px; }
 .swatches button {
   aspect-ratio: 1;
-  border: 0;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 2px solid transparent;
   border-radius: 10px;
   outline: 2px solid transparent;
   outline-offset: 2px;
+  color: #163300;
   transition: outline-color 160ms var(--ease-out), transform 140ms var(--ease-out);
 }
+/* The tick is the feedback. A 2px ring around a pastel square is invisible at
+   arm's length on a phone — the selection genuinely could not be seen, and the
+   only reason it ever appeared to "arrive late" was the next repaint. */
+.swatches button svg { width: 0; height: 0; opacity: 0; transition: opacity 140ms var(--ease-out); }
+.swatches button[data-selected='true'] svg { width: 18px; height: 18px; opacity: 1; }
 .swatches button:active { transform: scale(0.9); }
-.swatches button[data-selected='true'] { outline-color: var(--forest-green); }
+.swatches button[data-selected='true'] {
+  outline-color: var(--forest-green);
+  border-color: var(--card);
+}
 :root[data-theme='dark'] .swatches button[data-selected='true'] { outline-color: var(--bright-green); }
+
+/* Same grid as the swatches, so the two rows of controls read as one choice. */
+.iconpick {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 8px;
+  max-height: 188px;
+  overflow-y: auto;
+  padding: 2px;
+}
+.iconpick button {
+  aspect-ratio: 1;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--rule-strong);
+  border-radius: 10px;
+  background: var(--card);
+  color: var(--text-2);
+  transition: background-color 160ms var(--ease-out), border-color 160ms var(--ease-out),
+    transform 140ms var(--ease-out);
+}
+.iconpick button svg { width: 19px; height: 19px; }
+.iconpick button:active { transform: scale(0.9); }
+.iconpick button[data-selected='true'] {
+  background: var(--forest-green);
+  border-color: var(--forest-green);
+  color: var(--bright-green);
+}
 .newcat-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
 
 /* Teach: the picker replaces the amount column, so the row loses its tile. */
@@ -1377,6 +1588,11 @@ input:focus, select:focus, textarea:focus {
 :root[data-theme='dark'] select:focus,
 :root[data-theme='dark'] textarea:focus { border-color: var(--bright-green); }
 select { appearance: none; background-image: none; padding-right: 36px; }
+/* A native time input carries its own spinner and comes out ~2px taller than
+   everything else. It sits beside a DateField in EditSheet's .pair, where two
+   pixels apart is visible — trimmed here rather than stretching the row, so
+   nothing else in the form moves. */
+input[type='time'] { padding-top: 13px; padding-bottom: 13px; }
 
 /* One inline chevron, no icon dependency. */
 .field:has(select)::after,
@@ -1413,6 +1629,53 @@ select { appearance: none; background-image: none; padding-right: 36px; }
 }
 
 .empty { color: var(--muted); padding: 40px 0; text-align: center; font-size: 15px; }
+
+/* ── Skeletons ───────────────────────────────────────────────────────────── */
+.skel {
+  display: inline-block;
+  position: relative;
+  overflow: hidden;
+  flex: none;
+  background: var(--neutral);
+  border-radius: 8px;
+}
+/* A sheen, not a pulse: a whole screen fading in and out together reads as a
+   fault. The sweep says "still coming" and stays quiet doing it. */
+.skel::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, var(--sheen), transparent);
+  animation: sheen 1.3s var(--ease-in-out) infinite;
+}
+@keyframes sheen {
+  to { transform: translateX(100%); }
+}
+/* The global reduced-motion rule clamps every animation to 0.2s, which would
+   turn an infinite sweep into a strobe. Nothing moves here instead. */
+@media (prefers-reduced-motion: reduce) {
+  .skel::after { display: none; }
+}
+
+.skel-hero {
+  background: var(--neutral);
+  border-radius: var(--radius-lg);
+  padding: 22px 20px 20px;
+}
+.skel-hero .skel { background: rgba(22, 51, 0, 0.08); }
+:root[data-theme='dark'] .skel-hero .skel { background: rgba(255, 255, 255, 0.07); }
+.skel-hero-foot {
+  display: flex;
+  gap: 16px;
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--rule);
+}
+.skel-hero-foot .skel { flex: 1; }
+/* The row skeleton borrows .row's grid, so nothing shifts when the real rows
+   arrive — which is the entire point of drawing these instead of a spinner. */
+.ledger .row .skel + .skel { display: block; }
 
 /* Toasts are added rapidly, so this is a transition — a keyframe would restart
    from zero instead of retargeting when a second one lands. */

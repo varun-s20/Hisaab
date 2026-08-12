@@ -26,6 +26,11 @@ The `service_role` key is not safe anywhere near this app. Never copy that one.
 
 Supabase dashboard → **SQL Editor** → New query → paste all of `db/schema.sql` → **Run**.
 
+**On an existing database, also run `db/migrate-investment.sql`.** `create table
+if not exists` will not widen a CHECK constraint on a table that is already
+there, so without it saving a row as an *investment* fails with
+`violates check constraint "transactions_type_check"`. It touches no data.
+
 Verify: **Table Editor** should now show `transactions` and `merchant_map`, both with
 a green "RLS enabled" badge.
 
@@ -101,6 +106,39 @@ The bright-green panel and the code block stay fixed in both — that pairing is
 the brand, not a surface. Re-run `npm run icons` if the logo ever changes; the
 email pulls the same `icon-192.png` the app and the installer do.
 
+Gmail's app and Outlook.com ignore `prefers-color-scheme` entirely: they rewrite
+the colours themselves and stamp `data-ogsc` / `data-ogsb` on whatever they
+touched. The `[data-ogsc]` rules under the media query put the green panel and
+its dark ink back — without them the heading is lightened onto a panel that
+stays light green and reads as blank.
+
+### 3c-2. The sender's profile picture
+
+**No template change can set this, and neither can the app.** The avatar beside
+the sender name in Gmail comes from one of exactly two places:
+
+1. **BIMI.** A DNS record pointing at your logo, which mail providers fetch and
+   display. It needs, in order:
+   - `SPF` and `DKIM` passing, and `DMARC` at `p=quarantine` or `p=reject`
+     (`p=none` is not enough — this is the part people miss)
+   - the logo as **SVG Tiny PS**, square, on a solid background, hosted over
+     HTTPS. Not the PNG in `brand/` — a different profile of SVG with no
+     scripts, no external references, and a `<title>`
+   - `default._bimi.yourdomain.com  TXT  "v=BIMI1; l=https://yourdomain.com/bimi/hisaab.svg; a=self"`
+   - for **Gmail specifically**, a Verified Mark Certificate from Entrust or
+     DigiCert (a paid, verified-trademark certificate) in the `a=` field.
+     Without a VMC, Gmail will not show the mark. Yahoo and Fastmail will.
+
+2. **A Google Workspace profile photo**, if the address you send from is a real
+   Workspace mailbox and the recipient is on Gmail. Set the photo on that
+   account and Gmail uses it. This is the cheap route and the one most small
+   projects take — it needs the custom SMTP sender in §3d to be that mailbox.
+
+Until one of those is in place, Gmail draws a coloured letter tile. That is not
+something the HTML can override; anything claiming otherwise is describing the
+tiny inline `icon-192.png` at the top of the message body, which the templates
+already show.
+
 ### 3d. Email rate limit — read this before you get confused
 
 Supabase's built-in email service is capped (roughly **2 emails per hour** on a
@@ -169,9 +207,34 @@ git init && git add . && git commit -m "init"
 gh repo create hisaab --private --source=. --push
 ```
 
-Then Vercel → Add New → Project → import the repo. Framework preset: **Vite**.
+### Cloudflare Workers
+
+```bash
+npm run build
+npx wrangler secret put GEMINI_API_KEY
+npx wrangler secret put SUPABASE_URL         # same value as VITE_SUPABASE_URL
+npx wrangler secret put SUPABASE_ANON_KEY    # same value as VITE_SUPABASE_ANON_KEY
+npx wrangler deploy
+```
+
+**All three secrets are required.** `wrangler.jsonc` names `worker/index.js` as
+the entry point and routes `/api/*` to it; without them `api/_auth.js` fails
+closed and every AI call comes back 500.
+
+This part is not optional decoration. A deploy with **no** `main` in
+`wrangler.jsonc` serves static assets only: `POST /api/ask` falls through to the
+SPA fallback, returns `index.html` with a 200, and the client reads that as a
+failure and silently uses its offline parser for every question. The symptom is
+Ask answering ₹0 to things it obviously should know, and unknown merchants
+never being categorised at all. If you fork this, keep `main` and
+`run_worker_first`.
+
+### Or Vercel
+
+Vercel → Add New → Project → import the repo. Framework preset: **Vite**.
 Build command `npm run build`, output `dist`. Add the env vars from §4 before
-the first deploy.
+the first deploy. `api/*.js` are already in Vercel's own function shape, so
+nothing else is needed there.
 
 **Domain:** Vercel → Settings → Domains → add `hisaab.yourdomain.com`, then set the
 CNAME at your registrar as instructed. Come back and update Supabase's Site URL

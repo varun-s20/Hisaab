@@ -1,5 +1,6 @@
 import { supabase } from './supabase'
 import { synthRef } from './parse'
+import { normalise } from './seeds'
 import { today } from './format'
 
 const COLUMNS = [
@@ -27,7 +28,14 @@ function forInsert(t) {
   const amount = safeAmount(t.amount)
   // Anything we couldn't store an amount for is worth a look, including a row
   // whose parsed amount was out of range.
-  const needs_review = Boolean(t.needs_review) || amount == null
+  //
+  // A row the parser couldn't date is worth a look too, and used not to be: the
+  // date penalty alone lands confidence on exactly 0.7, and the flag is
+  // `confidence < 0.7`, so a dateless row slipped through unflagged and silently
+  // took today's date below. That is how a Tuesday payment showed up on
+  // Wednesday's Today screen with nothing on the row saying the date was
+  // invented.
+  const needs_review = Boolean(t.needs_review) || amount == null || t.txn_date == null
 
   return {
     txn_ref: t.txn_ref || synthRef({ ...t, amount }),
@@ -38,8 +46,13 @@ function forInsert(t) {
     txn_time: t.txn_time ?? null,
     amount,
     direction: t.direction ?? 'debit',
-    // An amount-less row is not yet a claim about spending.
-    type: amount ? (t.type ?? 'expense') : 'transfer',
+    // Whatever the cascade decided, kept as-is. This used to force 'transfer'
+    // on every amount-less row on the grounds that it "is not yet a claim about
+    // spending" — but the amount is null, so it contributes 0 to every total
+    // either way, and the type survived the trip through "Needs a look": you
+    // filled in the amount, pressed Save, and six confirmed payments landed as
+    // transfers, which every screen in the app excludes from every figure.
+    type: t.type ?? 'expense',
     payee_raw: t.payee_raw,
     payee_clean: t.payee_clean ?? null,
     category: t.category ?? null,
@@ -269,6 +282,17 @@ export async function deleteMerchantMapping(payee_pattern) {
   if (error) throw error
 }
 
+/** How many merchants are waiting in "Teach me". Same query as listUntaught —
+ *  the screen was the only thing that knew there was anything to do, so nobody
+ *  opened it. Cheap enough to run beside countNeedsReview on every refresh. */
+export async function countUntaught() {
+  try {
+    return (await listUntaught(500)).length
+  } catch {
+    return 0
+  }
+}
+
 /** Merchants seen in transactions that the map doesn't know yet. */
 export async function listUntaught(limit = 25) {
   const { data, error } = await supabase
@@ -300,18 +324,66 @@ export async function listUntaught(limit = 25) {
  * A credit was already typed correctly at import (income / refund / repaid);
  * teaching the merchant's category is not new information about its direction.
  */
-export async function recategoriseMerchant(payee_raw, { category, payee_clean, type }) {
-  const { error } = await supabase
-    .from('transactions')
-    .update({ category, payee_clean, type, needs_review: false })
-    .eq('payee_raw', payee_raw)
-    .eq('direction', 'debit')
-  if (error) throw error
+async function recategoriseRaws(raws, { category, payee_clean, type }) {
+  if (!raws.length) return 0
+  // Chunked for the same reason the dedup pre-check is: a few hundred names in
+  // a query string is a 414, not a row list.
+  for (let i = 0; i < raws.length; i += 100) {
+    const chunk = raws.slice(i, i + 100)
 
-  const { error: creditError } = await supabase
-    .from('transactions')
-    .update({ category, payee_clean, needs_review: false })
-    .eq('payee_raw', payee_raw)
-    .eq('direction', 'credit')
-  if (creditError) throw creditError
+    // Only rows whose type was a default get a new one. 'investment', 'lent'
+    // and 'refund' are things a person sat down and said about a specific row,
+    // and a later lesson about the merchant's *category* is not new information
+    // about any of them — teaching "SIP" used to flatten every investment under
+    // that merchant back to an expense.
+    const { error } = await supabase
+      .from('transactions')
+      .update({ category, payee_clean, type, needs_review: false })
+      .in('payee_raw', chunk)
+      .eq('direction', 'debit')
+      .in('type', ['expense', 'transfer'])
+    if (error) throw error
+
+    // The rest keep their type and still get the name and the category.
+    const { error: keptError } = await supabase
+      .from('transactions')
+      .update({ category, payee_clean, needs_review: false })
+      .in('payee_raw', chunk)
+      .eq('direction', 'debit')
+      .not('type', 'in', '("expense","transfer")')
+    if (keptError) throw keptError
+
+    const { error: creditError } = await supabase
+      .from('transactions')
+      .update({ category, payee_clean, needs_review: false })
+      .in('payee_raw', chunk)
+      .eq('direction', 'credit')
+    if (creditError) throw creditError
+  }
+  return raws.length
+}
+
+export const recategoriseMerchant = (payee_raw, patch) => recategoriseRaws([payee_raw], patch)
+
+/**
+ * The same job, keyed by the merchant map's own key.
+ *
+ * merchant_map stores `payee_pattern` — normalised: upper-cased, punctuation
+ * stripped, trailing terminal ids removed. Transactions store `payee_raw`,
+ * which is whatever the OCR read. Correcting a mapping in "What it has learned"
+ * was passing the pattern straight into an `eq('payee_raw', …)`, so it matched
+ * nothing at all except where the raw name happened to already be upper-case
+ * and punctuation-free. The toast said "past payments included" and no past
+ * payment had been touched.
+ *
+ * Postgres cannot run normalise(), so the mapping is done here: read the names,
+ * match them, then write by the names that actually matched.
+ */
+export async function recategoriseByPattern(payee_pattern, patch) {
+  const { data, error } = await supabase.from('transactions').select('payee_raw').limit(5000)
+  if (error) throw error
+  const raws = [...new Set((data ?? []).map((r) => r.payee_raw).filter(Boolean))].filter(
+    (raw) => normalise(raw) === payee_pattern,
+  )
+  return recategoriseRaws(raws, patch)
 }

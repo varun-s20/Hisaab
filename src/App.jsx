@@ -1,7 +1,11 @@
 import { Component, Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react'
 import { supabase, configured } from './lib/supabase'
-import { countNeedsReview } from './lib/db'
+import { countNeedsReview, countUntaught, listTransactions, listBudgets, TOTAL_BUDGET } from './lib/db'
 import { loadMerchantMap, clearMapCache } from './lib/categorise'
+import { today } from './lib/format'
+import * as notify from './lib/notify'
+import Nav, { TABS, SUB } from './components/Nav.jsx'
+import Select from './components/Select.jsx'
 import SignIn from './screens/SignIn.jsx'
 import Today from './screens/Today.jsx'
 import Ledger from './screens/Ledger.jsx'
@@ -14,15 +18,6 @@ const Import = lazy(() => import('./screens/Import.jsx'))
 const Ask = lazy(() => import('./screens/Ask.jsx'))
 const Budgets = lazy(() => import('./screens/Budgets.jsx'))
 const Merchants = lazy(() => import('./screens/Merchants.jsx'))
-
-const TABS = [
-  ['today', 'Today'],
-  ['ledger', 'Ledger'],
-  ['insights', 'Insights'],
-  ['more', 'More'],
-]
-
-const SUB = ['review', 'teach', 'import', 'ask', 'budgets', 'merchants']
 
 class ScreenBoundary extends Component {
   state = { failed: false }
@@ -60,6 +55,9 @@ export default function App() {
   const [session, setSession] = useState(undefined) // undefined = still checking
   const [tab, setTab] = useState('today')
   const [reviewCount, setReviewCount] = useState(0)
+  // "Teach me" had no count anywhere, so the only way to discover work was
+  // waiting there was to open the screen and look.
+  const [untaughtCount, setUntaughtCount] = useState(0)
 
   useEffect(() => {
     if (!configured) return setSession(null)
@@ -102,6 +100,7 @@ export default function App() {
 
   const refreshCounts = useCallback(() => {
     countNeedsReview().then(setReviewCount).catch(() => {})
+    countUntaught().then(setUntaughtCount).catch(() => {})
   }, [])
 
   useEffect(() => {
@@ -109,6 +108,56 @@ export default function App() {
     loadMerchantMap(true).catch(() => {})
     refreshCounts()
   }, [session, refreshCounts])
+
+  // Reminders. The facts live here because the worker cannot reach the
+  // database — a nudge to log the day is worth sending only on a day with
+  // nothing on it. See lib/notify.js.
+  const counts = useRef({ reviewCount: 0, untaughtCount: 0 })
+  counts.current = { reviewCount, untaughtCount }
+
+  useEffect(() => {
+    if (!session) return
+    // Re-read rather than cached for the session: the evening nudge asks "log
+    // today" and the app can easily be open from morning to night, so a fact
+    // read at 9am would nag someone who logged at noon. Nine minutes, against a
+    // watcher that ticks every ten — one one-row query per tick.
+    const cache = { at: 0, hasBudget: true, loggedToday: true }
+    const getFacts = async () => {
+      if (Date.now() - cache.at > 9 * 60 * 1000) {
+        const [rows, budgets] = await Promise.all([
+          listTransactions({ from: today(), to: today(), limit: 1 }).catch(() => []),
+          listBudgets().catch(() => null),
+        ])
+        cache.at = Date.now()
+        cache.loggedToday = rows.length > 0
+        // null means the read failed — keep the last answer rather than
+        // claiming there is no budget and firing the 1st-of-month reminder at
+        // someone who set one.
+        if (budgets) cache.hasBudget = budgets.some((b) => b.category === TOTAL_BUDGET)
+      }
+      return { ...cache, ...counts.current }
+    }
+
+    return notify.watch(getFacts)
+  }, [session])
+
+  // A tapped reminder lands on the screen it was about.
+  useEffect(() => {
+    const open = new URLSearchParams(location.search).get('open')
+    if (open && (TABS.some(([id]) => id === open) || SUB.includes(open))) {
+      current.current = open
+      setTab(open)
+      history.replaceState({ tab: open }, '', location.pathname)
+    }
+    const onMessage = (e) => {
+      const next = e.data?.type === 'hisaab-open' ? e.data.tab : null
+      if (!next) return
+      current.current = next
+      setTab(next)
+    }
+    navigator.serviceWorker?.addEventListener('message', onMessage)
+    return () => navigator.serviceWorker?.removeEventListener('message', onMessage)
+  }, [])
 
   if (session === undefined) return <div className="screen" />
   // Inside .app so the sign-in column matches the rest of the app on a desktop
@@ -130,22 +179,18 @@ export default function App() {
         {tab === 'review' && <Review onChange={refreshCounts} onBack={back} />}
         {tab === 'teach' && <Teach onChange={refreshCounts} onBack={back} />}
         {tab === 'import' && <Import onChange={refreshCounts} onBack={back} />}
-        {tab === 'more' && <More go={go} email={session.user?.email} reviewCount={reviewCount} />}
+        {tab === 'more' && (
+          <More
+            go={go}
+            email={session.user?.email}
+            reviewCount={reviewCount}
+            untaughtCount={untaughtCount}
+          />
+        )}
       </Suspense>
       </ScreenBoundary>
 
-      <nav className="nav">
-        {TABS.map(([id, label]) => (
-          <button
-            key={id}
-            aria-current={tab === id || (id === 'more' && SUB.includes(tab))}
-            onClick={() => go(id)}
-          >
-            {label}
-            {id === 'more' && reviewCount > 0 && <span className="badge">{reviewCount}</span>}
-          </button>
-        ))}
-      </nav>
+      <Nav tab={tab} go={go} badge={reviewCount + untaughtCount} />
     </div>
   )
 }
@@ -183,6 +228,104 @@ function ThemeToggle() {
   )
 }
 
+/**
+ * Reminders, off by default. Permission is asked on the tap and nowhere else —
+ * a prompt on first load is how a site gets blocked forever.
+ */
+function Reminders() {
+  const [prefs, setPrefs] = useState(null)
+  const [err, setErr] = useState('')
+
+  useEffect(() => {
+    notify.readPrefs().then(setPrefs)
+  }, [])
+
+  if (!prefs) return <div className="panel" style={{ minHeight: 78 }} />
+
+  if (!notify.supported()) {
+    return (
+      <div className="panel">
+        <p className="muted" style={{ fontSize: 13, margin: 0 }}>
+          This browser can&rsquo;t show reminders. Install the app from Chrome on Android
+          and they&rsquo;ll arrive even when it&rsquo;s closed.
+        </p>
+      </div>
+    )
+  }
+
+  const on = prefs.enabled && Notification.permission === 'granted'
+
+  async function toggle() {
+    setErr('')
+    try {
+      if (on) {
+        await notify.disable()
+      } else {
+        await notify.enable()
+      }
+      setPrefs(await notify.readPrefs())
+    } catch (e) {
+      setErr(e.message ?? String(e))
+    }
+  }
+
+  async function set(patch) {
+    setPrefs(await notify.writePrefs(patch))
+  }
+
+  return (
+    <>
+      <div className="panel switchrow">
+        <label htmlFor="notify-switch">
+          <span className="k">Remind me</span>
+          <span className="sub">The 1st to budget, once a day to log, Sunday if anything is waiting</span>
+        </label>
+        <button
+          id="notify-switch"
+          role="switch"
+          aria-checked={on}
+          aria-label="Reminders"
+          className="switch"
+          onClick={toggle}
+        >
+          <i />
+        </button>
+      </div>
+
+      {prefs.enabled && Notification.permission !== 'granted' && (
+        <p className="muted" style={{ fontSize: 12.5, margin: '8px 2px 0', lineHeight: 1.6 }}>
+          {Notification.permission === 'denied'
+            ? 'Reminders are on, but this site is blocked from showing notifications. Allow them in the browser’s site settings.'
+            : 'Reminders are on. Tap the switch to let the browser show them.'}
+        </p>
+      )}
+
+      {on && (
+        <div className="panel" style={{ marginTop: 10 }}>
+          {/* Every hour. "Evening" was my assumption, not yours — someone who
+              logs on the commute wants 8am and someone who logs in bed wants
+              1am, and neither was on the list. */}
+          <Select
+            label="Daily nudge, from"
+            value={prefs.dailyHour}
+            onChange={(h) => set({ dailyHour: h })}
+            options={Array.from({ length: 24 }, (_, h) => ({
+              value: h,
+              label: `${h % 12 === 0 ? 12 : h % 12}:00 ${h >= 12 ? 'pm' : 'am'}`,
+            }))}
+          />
+          <p className="muted" style={{ fontSize: 12, margin: '12px 0 0', lineHeight: 1.6 }}>
+            Skipped on a day you&rsquo;ve already logged something. Nothing about your money
+            leaves the device — these are written and scheduled here.
+          </p>
+        </div>
+      )}
+
+      {err && <p className="alert" style={{ fontSize: 13 }}>{err}</p>}
+    </>
+  )
+}
+
 const MENU = [
   ['ask', 'Ask', 'A question about your money, answered on this device'],
   ['budgets', 'Budgets', 'A number to spend against, not just one spent'],
@@ -207,7 +350,8 @@ async function signOut() {
   await supabase.auth.signOut()
 }
 
-function More({ go, email, reviewCount }) {
+function More({ go, email, reviewCount, untaughtCount }) {
+  const badges = { review: reviewCount, teach: untaughtCount }
   return (
     <div className="screen">
       <h1 className="title">More</h1>
@@ -221,7 +365,7 @@ function More({ go, email, reviewCount }) {
                   <span className="name">{label}</span>
                   <span className="meta">{sub}</span>
                 </span>
-                {id === 'review' && reviewCount > 0 && <span className="badge solo">{reviewCount}</span>}
+                {badges[id] > 0 && <span className="badge solo">{badges[id]}</span>}
                 <svg className="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
                   <path d="m9 18 6-6-6-6" />
                 </svg>
@@ -230,6 +374,9 @@ function More({ go, email, reviewCount }) {
           ))}
         </ul>
       </div>
+
+      <h2 className="section">Reminders</h2>
+      <Reminders />
 
       <h2 className="section">Appearance</h2>
       <ThemeToggle />

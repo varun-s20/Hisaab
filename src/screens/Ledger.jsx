@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
 import { listTransactions } from '../lib/db'
-import { money, dayLabel, today, spendTotal, earnTotal } from '../lib/format'
+import { money, dayLabel, today, spendTotal, earnTotal, investTotal } from '../lib/format'
 import { makeRange } from '../lib/range'
 import RangePicker from '../components/RangePicker.jsx'
+import { Bar, RowsSkeleton } from '../components/Skeleton.jsx'
 import { Row } from './Today.jsx'
 
 // The ledger proper. One card per day, hairlines inside it — the card is what
@@ -72,7 +73,7 @@ export default function Ledger({ onChange }) {
   // Totals track the range, not the filter — switching to "Money in" is a way
   // of reading the list, not a claim that the month had no spending.
   const totals = useMemo(
-    () => ({ out: spendTotal(rows), in: earnTotal(rows) }),
+    () => ({ out: spendTotal(rows), in: earnTotal(rows), invested: investTotal(rows) }),
     [rows],
   )
 
@@ -123,22 +124,36 @@ export default function Ledger({ onChange }) {
         range={range}
       />
 
+      {/* `rows` still holds the previous period until the new one lands, so
+          these three figures would otherwise state last month's totals under
+          this month's heading for as long as the request takes. */}
       <div className="totals card">
-        <div>
-          <span className="k">Money out</span>
-          <span className="v num out">₹{money(totals.out)}</span>
-        </div>
-        <div>
-          <span className="k">Money in</span>
-          <span className="v num in">₹{money(totals.in)}</span>
-        </div>
-        <div>
-          <span className="k">Net</span>
-          <span className="v num">
-            {totals.in - totals.out < 0 ? '−' : ''}₹{money(Math.abs(totals.in - totals.out))}
-          </span>
-        </div>
+        {['Money out', 'Money in', 'Net'].map((k, i) => (
+          <div key={k}>
+            <span className="k">{k}</span>
+            {loaded ? (
+              <span className={`v num ${i === 0 ? 'out' : i === 1 ? 'in' : ''}`.trim()}>
+                {i === 0 && `₹${money(totals.out)}`}
+                {i === 1 && `₹${money(totals.in)}`}
+                {i === 2 &&
+                  `${totals.in - totals.out < 0 ? '−' : ''}₹${money(Math.abs(totals.in - totals.out))}`}
+              </span>
+            ) : (
+              <Bar h={20} w="80%" style={{ marginTop: 5 }} />
+            )}
+          </div>
+        ))}
       </div>
+
+      {/* A fourth column would clip a six-figure number on a 320px phone, and
+          leaving it out entirely made an SIP invisible in every figure on the
+          screen while plainly sitting in the list below. */}
+      {totals.invested > 0 && (
+        <p className="muted" style={{ fontSize: 12.5, margin: '-6px 2px 12px' }}>
+          Plus <span className="num">₹{money(totals.invested)}</span> into investments — out
+          of the account, but not spent, so it is in neither figure above.
+        </p>
+      )}
 
       <div className="chips" role="tablist" aria-label="Show">
         {FILTERS.map(([id, label]) => (
@@ -169,6 +184,16 @@ export default function Ledger({ onChange }) {
         )}
       </div>
 
+      {/* Stepping back a month over a slow connection used to leave the whole
+          page below the search box blank, which is indistinguishable from a
+          month with nothing in it. */}
+      {!loaded && (
+        <div role="status" aria-label="Loading transactions">
+          <RowsSkeleton rows={3} head />
+          <RowsSkeleton rows={2} head />
+        </div>
+      )}
+
       {loaded && shown.length === 0 && (
         <div className="card">
           <p className="empty">
@@ -177,7 +202,7 @@ export default function Ledger({ onChange }) {
         </div>
       )}
 
-      {groups.map(([date, list]) => (
+      {loaded && groups.map(([date, list]) => (
         <div className="card" key={date}>
           {/* The card above is scoped to the range on purpose; this one is scoped
               to the rows printed under it, which is a different promise. Summing
@@ -194,7 +219,7 @@ export default function Ledger({ onChange }) {
         </div>
       ))}
 
-      {shown.length > 0 && (
+      {loaded && shown.length > 0 && (
         <p style={{ textAlign: 'center', marginTop: 22 }}>
           <button className="linkish quiet" onClick={exportCsv}>
             Export {shown.length} row{shown.length === 1 ? '' : 's'} as CSV

@@ -32,7 +32,8 @@ function allowed(body) {
 // model's category is snapped to CATEGORIES below regardless of what it says.
 // Pin it with GEMINI_MODEL if a specific version ever matters.
 // `node scripts/list-models.mjs` shows what this key can actually call.
-const MODEL = process.env.GEMINI_MODEL || 'gemini-flash-lite-latest'
+// Lazy: on Cloudflare the bindings are only there once a request is in flight.
+const model = () => process.env.GEMINI_MODEL || 'gemini-flash-lite-latest'
 
 /** A merchant name, and nothing that could read as an instruction. */
 function cleanName(v) {
@@ -76,6 +77,7 @@ Rules:
 
 Input: ${JSON.stringify(merchants)}`
 
+  const MODEL = model()
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${process.env.GEMINI_API_KEY}`
 
   try {

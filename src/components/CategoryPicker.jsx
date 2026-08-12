@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { allCategories, addCategory, removeCategory, isCustom, PICKABLE_COLORS } from '../lib/categories'
-import CategoryIcon from './CategoryIcon.jsx'
+import CategoryIcon, { ICON_NAMES, Glyph } from './CategoryIcon.jsx'
 import Sheet from './Sheet.jsx'
 
 // Replaces the native <select>. A dropdown of fourteen strings gives you no
@@ -19,6 +19,7 @@ export default function CategoryPicker({
   const [adding, setAdding] = useState(false)
   const [name, setName] = useState('')
   const [colour, setColour] = useState(PICKABLE_COLORS[0])
+  const [icon, setIcon] = useState(ICON_NAMES[0])
   const [err, setErr] = useState('')
   // The category waiting on a yes, if any.
   const [dropping, setDropping] = useState('')
@@ -40,10 +41,9 @@ export default function CategoryPicker({
     setOpen(false)
   }
 
-  function create(e) {
-    e.preventDefault()
+  function create() {
     try {
-      const created = addCategory(name, colour)
+      const created = addCategory(name, colour, icon)
       setList(allCategories())
       pick(created)
     } catch (e2) {
@@ -75,7 +75,11 @@ export default function CategoryPicker({
         </>
       ) : (
         <>
-          <span className="tile sm empty" />
+          {/* `blank`, not `empty`: `.empty` is the global empty-state rule and
+              carries `padding: 40px 0`, which the placeholder tile inherited —
+              that is the entire reason this control stood two inches taller
+              than every input beside it. */}
+          <span className="tile sm blank" />
           <span className="picker-label muted">{placeholder}</span>
         </>
       )}
@@ -116,7 +120,20 @@ export default function CategoryPicker({
                 </div>
               ) : (
                 <>
-                  <button type="button" data-selected={c === value} onClick={() => pick(c)}>
+                  {/* .catrow, not a bare <button>: `.catcell > button` styled
+                      *every* direct child button, which included the remove
+                      control below — it inherited width:100% and grid columns,
+                      so the ✕ was stretched across the whole row and drawn over
+                      the icon. Tapping the row you wanted to select hit remove
+                      instead, which is why a category you had made could never
+                      be picked a second time. */}
+                  <button
+                    type="button"
+                    className="catrow"
+                    data-selected={c === value}
+                    data-removable={isCustom(c)}
+                    onClick={() => pick(c)}
+                  >
                     <CategoryIcon category={c} />
                     <span>{c}</span>
                     {c === value && (
@@ -144,7 +161,20 @@ export default function CategoryPicker({
         </div>
 
         {adding ? (
-          <form className="newcat" onSubmit={create}>
+          // A <div>, not a <form>. This sheet is opened from inside the forms
+          // in ManualEntry, EditSheet and Budgets, so a form here nested one
+          // inside another — and a nested submit does not just warn, it bubbles
+          // to the outer handler: adding a category from the cash-payment sheet
+          // was firing ManualEntry's save. Enter still works, below.
+          <div className="newcat">
+            {/* The one honest answer to "did that colour take?" — the thing
+                being made, drawn as it will appear in every row. A 2px ring on
+                a swatch is not an answer you can see on a phone. */}
+            <div className="newcat-preview">
+              <CategoryIcon icon={icon} color={colour} />
+              <span className="nm">{name.trim() || 'New category'}</span>
+            </div>
+
             <label className="field">
               <span>Name</span>
               <input
@@ -156,9 +186,18 @@ export default function CategoryPicker({
                   setName(e.target.value)
                   setErr('')
                 }}
+                // What the <form> was doing for us. Kept on the input rather
+                // than the container so Enter in the name field adds it and
+                // Enter anywhere else does nothing surprising.
+                onKeyDown={(e) => {
+                  if (e.key !== 'Enter') return
+                  e.preventDefault()
+                  if (name.trim()) create()
+                }}
                 placeholder="Pets, Gifts, Travel…"
               />
             </label>
+
             <span className="field-label">Colour</span>
             <div className="swatches">
               {PICKABLE_COLORS.map((c) => (
@@ -166,22 +205,44 @@ export default function CategoryPicker({
                   type="button"
                   key={c}
                   aria-label={`Colour ${c}`}
+                  aria-pressed={c === colour}
                   data-selected={c === colour}
                   style={{ background: c }}
                   onClick={() => setColour(c)}
-                />
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="m5 13 4 4L19 7" />
+                  </svg>
+                </button>
               ))}
             </div>
+
+            <span className="field-label" style={{ marginTop: 16 }}>Icon</span>
+            <div className="iconpick">
+              {ICON_NAMES.map((n) => (
+                <button
+                  type="button"
+                  key={n}
+                  aria-label={`Icon ${n.replace(/-/g, ' ')}`}
+                  aria-pressed={n === icon}
+                  data-selected={n === icon}
+                  onClick={() => setIcon(n)}
+                >
+                  <Glyph icon={n} />
+                </button>
+              ))}
+            </div>
+
             {err && <p className="alert" style={{ fontSize: 14, margin: '10px 0 0' }}>{err}</p>}
             <div className="newcat-actions">
               <button type="button" className="btn ghost small" onClick={() => setAdding(false)}>
                 Cancel
               </button>
-              <button className="btn small" disabled={!name.trim()}>
+              <button type="button" className="btn small" disabled={!name.trim()} onClick={create}>
                 Add category
               </button>
             </div>
-          </form>
+          </div>
         ) : (
           <button type="button" className="btn ghost" style={{ marginTop: 14 }} onClick={() => setAdding(true)}>
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">

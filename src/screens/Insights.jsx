@@ -6,6 +6,7 @@ import { colorFor, allCategories } from '../lib/categories'
 import { findRecurring, committedPerMonth } from '../lib/recurring'
 import CategoryIcon from '../components/CategoryIcon.jsx'
 import Amount from '../components/Amount.jsx'
+import Skeleton, { HeroSkeleton, RowsSkeleton } from '../components/Skeleton.jsx'
 
 // Not a dashboard of squares. Findings first, in sentences, then the numbers
 // that back them. Every sentence here is arithmetic on rows already on the
@@ -17,6 +18,67 @@ function palette() {
   const cs = getComputedStyle(document.documentElement)
   const v = (n) => cs.getPropertyValue(n).trim()
   return { line: v('--chart-line'), ghost: v('--chart-ghost'), rule: v('--rule'), card: v('--card') }
+}
+
+// What the donut can be pointed at. Investment sits third, after income, and
+// is its own kind of money rather than a flavour of transfer — an SIP is not
+// spending, and calling it one made every "where did it go" figure wrong.
+const SPLITS = [
+  ['expense', 'Expense'],
+  ['income', 'Income'],
+  ['investment', 'Investment'],
+  ['transfer', 'Transfer'],
+]
+const SPLIT_ALL = {
+  expense: 'All categories',
+  income: 'All money in',
+  investment: 'All invested',
+  transfer: 'All transfers',
+}
+const SPLIT_VERB = {
+  expense: 'spent',
+  income: 'received',
+  investment: 'invested',
+  transfer: 'transferred',
+}
+// Only spending is worth splitting by category — that is what categories are
+// for. Money in, investments and transfers all live in one or two categories
+// each ('Income', 'Transfers'), so a category donut of them is a single ring in
+// a single colour saying nothing. Split those by who the money went to or came
+// from instead.
+const SPLIT_BY = { expense: 'category', income: 'merchant', investment: 'merchant', transfer: 'merchant' }
+
+/**
+ * Slice colours.
+ *
+ * A category's own colour is the right answer when it has one and it is
+ * distinct. Two of the fourteen are deliberately neutral — Transfers #D0D5CE
+ * and Other #E7E7E1 — which is correct beside a bright category and useless as
+ * a whole ring; and a category the user invented can pick a hex a built-in
+ * already owns, so two slices come out identical. Anything neutral, repeated,
+ * or absent falls through to the next unused hue.
+ */
+const WHEEL = [
+  '#FFC091', '#9FE870', '#A0E1E1', '#FFD7EF', '#FADC65', '#C6A8D9',
+  '#51C8C8', '#FF8787', '#C5EDAB', '#FFEB69', '#77D4D4', '#FFA8AD',
+]
+const NEUTRALS = new Set(['#D0D5CE', '#E7E7E1'])
+// A literal, not var(--rule-strong): recharts writes fill as an SVG attribute,
+// and a translucent rule colour drew the swept-up remainder as a ghost of a
+// slice that was often a tenth of the month.
+const REST_COLOR = '#AEB3A9'
+
+function paint(slices, byCategory) {
+  const used = new Set()
+  return slices.map((s) => {
+    if (s.name === 'Everything else') return { ...s, color: REST_COLOR }
+    let c = byCategory ? colorFor(s.category ?? s.name)?.toUpperCase() : null
+    if (!c || NEUTRALS.has(c) || used.has(c)) {
+      c = WHEEL.find((w) => !used.has(w)) ?? REST_COLOR
+    }
+    used.add(c)
+    return { ...s, color: c }
+  })
 }
 
 const dayNum = (d) => Number(String(d).slice(8, 10))
@@ -48,9 +110,6 @@ const Rs = ({ n, className = '' }) => (
   </span>
 )
 
-const Skeleton = ({ h }) => (
-  <div style={{ height: h, background: 'var(--neutral)', borderRadius: 'var(--radius)', marginBottom: 12 }} />
-)
 
 /** Hold the old value until the blur has covered it, then swap. A straight
  *  crossfade shows two texts overlapping; blur bridges them into one change.
@@ -151,6 +210,7 @@ export default function Insights({ goAsk }) {
   const [attempt, setAttempt] = useState(0)
   const [c] = useState(palette)
   const [active, setActive] = useState(null) // index into the donut slices
+  const [split, setSplit] = useState('expense') // which kind of money the donut shows
 
   useEffect(() => {
     let live = true
@@ -234,7 +294,37 @@ export default function Insights({ goAsk }) {
     // Six slices plus a swept-up remainder. Past that a donut is confetti.
     const cats = ranked.slice(0, 6)
     const rest = ranked.slice(6).reduce((s, x) => s + x.amt, 0)
-    const slices = rest > 0 ? [...cats, { name: 'Everything else', amt: rest, prevMTD: 0 }] : cats
+
+    // The split, per kind of money. Spending is the default view; the other
+    // three are the same arithmetic over a different set of types, so the donut
+    // can answer "where did my income come from" and "what did I put away"
+    // without a second screen.
+    const curAll = (rows ?? []).filter((r) => r.txn_date >= monthStart)
+    const splitFor = (types, by) => {
+      const list = curAll.filter((r) => types.includes(r.type))
+      const sum = list.reduce((s, r) => s + Number(r.amount || 0), 0)
+      const m = new Map()
+      for (const r of list) {
+        // The category rides along whatever we grouped by, because it is what
+        // picks the glyph in the legend.
+        const key = by === 'merchant' ? r.payee_clean || r.payee_raw || 'Unknown' : catOf(r)
+        const g = m.get(key) ?? { name: key, amt: 0, category: catOf(r), prevMTD: 0 }
+        g.amt += Number(r.amount || 0)
+        m.set(key, g)
+      }
+      const ranked2 = [...m.values()].sort((x, y) => y.amt - x.amt)
+      const top = ranked2.slice(0, 6)
+      const other = ranked2.slice(6).reduce((s, x) => s + x.amt, 0)
+      const slices = other > 0 ? [...top, { name: 'Everything else', amt: other, category: 'Other', prevMTD: 0 }] : top
+      return { total: sum, count: list.length, slices: paint(slices, by === 'category') }
+    }
+    const expenseSlices = rest > 0 ? [...cats, { name: 'Everything else', amt: rest, prevMTD: 0 }] : cats
+    const splits = {
+      expense: { total: spendTotal(cur), count: cur.length, slices: paint(expenseSlices, true) },
+      income: splitFor(['income', 'refund', 'repaid'], SPLIT_BY.income),
+      investment: splitFor(['investment'], SPLIT_BY.investment),
+      transfer: splitFor(['transfer', 'lent'], SPLIT_BY.transfer),
+    }
 
     const byMerchant = new Map()
     for (const r of cur) {
@@ -280,8 +370,8 @@ export default function Insights({ goAsk }) {
     const lapsed = found.filter(hasLapsed)
 
     return {
-      dim, dom, line, mtd, prevTotal, projected, monthCount,
-      cats: ranked.slice(0, 8), slices, merchants, strip, busiest, unusual, recurring, lapsed,
+      dim, dom, line, mtd, prevTotal, projected, monthCount, splits,
+      cats: ranked.slice(0, 8), merchants, strip, busiest, unusual, recurring, lapsed,
     }
   }, [rows])
 
@@ -313,11 +403,21 @@ export default function Insights({ goAsk }) {
 
   if (!rows) {
     return (
-      <div className="screen">
+      <div className="screen" role="status" aria-label="Loading your month">
         <p className="eyebrow">Insights</p>
-        <Skeleton h={190} />
-        <Skeleton h={120} />
-        <Skeleton h={280} />
+        <h1 className="title">Where your money actually went</h1>
+        <Skeleton h={54} style={{ marginBottom: 14, borderRadius: 'var(--radius-pill)' }} />
+        <HeroSkeleton />
+        <div className="tiles" style={{ marginTop: 14 }}>
+          <Skeleton h={76} />
+          <Skeleton h={76} />
+        </div>
+        <h2 className="section">The split</h2>
+        <Skeleton h={300} />
+        <h2 className="section">Against last month</h2>
+        <Skeleton h={210} />
+        <h2 className="section">Repeats</h2>
+        <RowsSkeleton rows={3} />
       </div>
     )
   }
@@ -336,9 +436,13 @@ export default function Insights({ goAsk }) {
     )
   }
 
-  // Logged, but none of it spending. Every chart below divides by the month's
-  // spend, so there is nothing to draw — but the reason is the opposite of empty.
-  if (d.mtd === 0) {
+  // Logged, but none of it spending *or* anything else the split can show.
+  // A month of one salary and one SIP has plenty to look at, and bailing here
+  // used to make the new Income and Investment views unreachable in exactly the
+  // month they were most worth having.
+  const otherMoney =
+    d.splits.income.count + d.splits.investment.count + d.splits.transfer.count
+  if (d.mtd === 0 && otherMoney === 0) {
     return (
       <div className="screen">
         <p className="eyebrow">Insights</p>
@@ -355,7 +459,12 @@ export default function Insights({ goAsk }) {
 
   const notes = findings(d)
   const ticks = [...new Set([1, Math.round(d.dom / 2), d.dom])].filter((t) => t >= 1)
-  const picked = shownActive == null ? null : d.slices[shownActive]
+  // A tab with nothing in it falls through to the first that has something,
+  // rather than drawing a ring of nothing on the month's opening days.
+  const activeSplit =
+    d.splits[split].count > 0 ? split : (SPLITS.find(([id]) => d.splits[id].count > 0)?.[0] ?? 'expense')
+  const shownSplit = d.splits[activeSplit]
+  const picked = shownActive == null ? null : shownSplit.slices[shownActive]
 
   return (
     <div className="screen">
@@ -413,13 +522,33 @@ export default function Insights({ goAsk }) {
       </div>
 
       <h2 className="section">The split</h2>
+      <div className="chips" role="tablist" aria-label="What the split shows">
+        {SPLITS.map(([id, label]) => (
+          <button
+            key={id}
+            role="tab"
+            aria-selected={activeSplit === id}
+            disabled={d.splits[id].count === 0}
+            onClick={() => {
+              setSplit(id)
+              setActive(null)
+            }}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
       <div className="card">
         <div className="card-body" style={{ paddingBottom: 6 }}>
+          {shownSplit.slices.length === 0 ? (
+            <p className="empty">Nothing {SPLIT_VERB[activeSplit]} this month.</p>
+          ) : (
+          <>
           <div className="donut">
             <ResponsiveContainer width="100%" height={224}>
               <PieChart>
                 <Pie
-                  data={d.slices}
+                  data={shownSplit.slices}
                   dataKey="amt"
                   nameKey="name"
                   innerRadius="66%"
@@ -437,10 +566,10 @@ export default function Insights({ goAsk }) {
                   isAnimationActive={false}
                   onClick={(_, i) => setActive((a) => (a === i ? null : i))}
                 >
-                  {d.slices.map((s, i) => (
+                  {shownSplit.slices.map((s, i) => (
                     <Cell
                       key={s.name}
-                      fill={s.name === 'Everything else' ? 'var(--rule-strong)' : colorFor(s.name)}
+                      fill={s.color}
                       // Dimming the rest is the selection. No exploding slices —
                       // a segment that jumps out moves the whole ring's balance.
                       opacity={active == null || active === i ? 1 : 0.28}
@@ -453,11 +582,11 @@ export default function Insights({ goAsk }) {
 
             <div className="centre">
               <div className="swap" data-swapping={swapping}>
-                <div className="k">{picked ? picked.name : 'All categories'}</div>
-                <div className="v num">₹{money(picked ? picked.amt : d.mtd)}</div>
+                <div className="k">{picked ? picked.name : SPLIT_ALL[activeSplit]}</div>
+                <div className="v num">₹{money(picked ? picked.amt : shownSplit.total)}</div>
                 {picked && (
                   <div className="k" style={{ marginTop: 4 }}>
-                    {Math.round((picked.amt / d.mtd) * 100)}% of the month
+                    {Math.round((picked.amt / (shownSplit.total || 1)) * 100)}% of the month
                   </div>
                 )}
               </div>
@@ -465,19 +594,24 @@ export default function Insights({ goAsk }) {
           </div>
 
           <div className="legend" style={{ marginTop: 8 }}>
-            {d.slices.map((s, i) => (
+            {shownSplit.slices.map((s, i) => (
               <button
                 key={s.name}
                 data-active={active === i}
                 onClick={() => setActive((a) => (a === i ? null : i))}
               >
-                <CategoryIcon category={s.name === 'Everything else' ? 'Other' : s.name} />
+                {/* The slice's colour, not the category's — otherwise the tile
+                    and the arc it points at disagree the moment a colour was
+                    reassigned for being neutral or a repeat. */}
+                <CategoryIcon category={s.category ?? s.name} color={s.color} />
                 <span className="nm">{s.name}</span>
-                <span className="pc">{Math.round((s.amt / d.mtd) * 100)}%</span>
+                <span className="pc">{Math.round((s.amt / (shownSplit.total || 1)) * 100)}%</span>
                 <span className="vl num">₹{money(s.amt)}</span>
               </button>
             ))}
           </div>
+          </>
+          )}
         </div>
       </div>
 

@@ -119,6 +119,40 @@ const PERIODS = [
 ]
 
 const IN_WORDS = /\b(received|credited|income|refund|paid me|came in|money in)\b/
+const INVEST_WORDS = /\b(invest|invested|investment|investments|sip|sips|mutual fund|mutual funds)\b/
+/** A question about "everything", not about spending. */
+const ANY_TYPE_WORDS = /\b(transaction|transactions|payment|payments|entry|entries|everything|all of it)\b/
+const BIGGEST = /\b(biggest|largest|major|highest|top|most expensive|maximum|max|dearest)\b/
+
+/**
+ * Words that are about *asking*, not about a merchant.
+ *
+ * Whatever survived the known vocabulary used to become `spec.merchant`
+ * verbatim, so "what was my major transaction" filtered on a payee containing
+ * the literal string "major transaction" — nothing matched, and Ask answered
+ * every such question with ₹0 and no hint that it had invented a filter. A
+ * merchant name is what is left after *all* the question words are gone, and
+ * when nothing is left the answer is "no merchant filter", not "match nothing".
+ */
+const NOT_A_MERCHANT = new Set([
+  'how', 'much', 'many', 'did', 'do', 'does', 'i', 'my', 'me', 'mine', 'the', 'a', 'an',
+  'on', 'in', 'at', 'for', 'from', 'to', 'of', 'is', 'are', 'was', 'were', 'be', 'been',
+  'spend', 'spent', 'spending', 'pay', 'paid', 'paying', 'cost', 'costs', 'buy', 'bought',
+  'show', 'find', 'list', 'give', 'tell', 'get', 'see', 'all', 'any', 'some', 'what',
+  'whats', 'which', 'where', 'when', 'who', 'whom', 'why', 'total', 'totals', 'sum',
+  'and', 'or', 'by', 'with', 'per', 'each', 'over', 'under', 'about', 'around', 'than',
+  'more', 'less', 'least', 'biggest', 'largest', 'major', 'highest', 'lowest', 'top',
+  'maximum', 'max', 'minimum', 'min', 'average', 'avg', 'expensive', 'cheap', 'cheapest',
+  'transaction', 'transactions', 'payment', 'payments', 'purchase', 'purchases', 'entry',
+  'entries', 'expense', 'expenses', 'spends', 'bill', 'bills', 'money', 'amount', 'amounts',
+  'rupees', 'rs', 'inr', 'everything', 'anything', 'something', 'thing', 'things',
+  'last', 'this', 'that', 'these', 'those', 'ever', 'again', 'still', 'just', 'only',
+  'day', 'days', 'week', 'weeks', 'month', 'months', 'year', 'years', 'time', 'times',
+  'ago', 'recent', 'recently', 'lately', 'now', 'today', 'yesterday', 'category',
+  'categories', 'merchant', 'merchants', 'app', 'apps', 'method', 'methods', 'account',
+  'have', 'has', 'had', 'can', 'could', 'would', 'should', 'will', 'if', 'it', 'its',
+])
+
 const GROUP_WORDS = [
   [/\bwhich app|what app|payment method|platform|gpay|phonepe|paytm|upi|cash\b/, 'method'],
   [/\bwho|merchant|where did i (spend|pay)|shop\b/, 'merchant'],
@@ -163,19 +197,33 @@ export function guess(question, { methods = [] } = {}) {
     }
   }
 
-  spec.types = IN_WORDS.test(q) ? ['income', 'refund', 'repaid'] : ['expense']
+  // An explicit "transaction"/"payment" question is about everything that
+  // happened, not only about spending — "what was my biggest transaction" must
+  // be allowed to answer with a salary or an SIP.
+  spec.types = INVEST_WORDS.test(q)
+    ? ['investment']
+    : IN_WORDS.test(q)
+      ? ['income', 'refund', 'repaid']
+      : ANY_TYPE_WORDS.test(q)
+        ? []
+        : ['expense']
   spec.groupBy = GROUP_WORDS.find(([re]) => re.test(q))?.[1] ?? null
-  spec.sort = /\bbiggest|largest|most|top|highest\b/.test(q) ? 'amount' : 'date'
+  spec.sort = BIGGEST.test(q) || /\bmost\b/.test(q) ? 'amount' : 'date'
 
-  // Whatever survives the known vocabulary is probably a merchant name.
+  // Whatever survives the known vocabulary *and* is not a question word is
+  // probably a merchant name. Nothing left means no merchant filter, which is
+  // the difference between "your biggest transaction" and ₹0.
   const leftover = rest
-    .replace(/\b(how much|did i|do i|i|my|me|the|a|an|on|in|at|for|from|to|of|spend|spent|pay|paid|show|find|all|was|were|what|which|where|when|total|and|by|with|most|any)\b/g, ' ')
     .replace(/[^a-z0-9 ]/g, ' ')
-    .replace(/\s+/g, ' ')
+    .split(/\s+/)
+    .filter((w) => w.length > 1 && !NOT_A_MERCHANT.has(w) && !/^\d+$/.test(w))
+    .join(' ')
     .trim()
   if (leftover.length >= 3) spec.merchant = leftover
 
-  spec.answer = 'Best guess — the assistant was unreachable, so this was read on your phone.'
+  spec.answer = spec.merchant
+    ? `Best guess — read on your phone, matching “${spec.merchant}”.`
+    : 'Best guess — the assistant was unreachable, so this was read on your phone.'
   return spec
 }
 

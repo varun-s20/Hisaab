@@ -15,8 +15,12 @@ create table if not exists transactions (
   -- in "Needs a look" with the raw text attached. Always positive when present.
   amount        numeric(12,2),
   direction     text not null check (direction in ('debit','credit')),
+  -- 'investment' is money put away, not spent: it counts in neither spending
+  -- nor income and has its own view on Insights. An existing database needs
+  -- db/migrate-investment.sql for this list; "if not exists" above will not
+  -- widen a constraint on a table that already exists.
   type          text not null default 'expense'
-                check (type in ('expense','income','transfer','refund','lent','repaid')),
+                check (type in ('expense','income','investment','transfer','refund','lent','repaid')),
 
   payee_raw     text not null,           -- exactly as OCR'd
   payee_clean   text,                    -- after merchant map

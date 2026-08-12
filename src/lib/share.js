@@ -6,11 +6,14 @@
 const SHARE_CACHE = 'hisaab-shared'
 const SHARE_KEY = '/__shared-screenshots'
 
-const toFile = ({ name, type, data }) => {
+const toFile = ({ name, type, data, lastModified }) => {
   const bin = atob(data)
   const bytes = new Uint8Array(bin.length)
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
-  return new File([bytes], name, { type })
+  // Without lastModified a rebuilt File claims it was created just now, and the
+  // parser dates every "Paid Today" row to the day of the share rather than the
+  // day of the payment.
+  return new File([bytes], name, { type, lastModified: lastModified || Date.now() })
 }
 
 /** [] unless the app was just opened from a share. Safe to call on every mount. */

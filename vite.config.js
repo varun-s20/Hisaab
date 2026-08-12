@@ -129,7 +129,7 @@ export default defineConfig(({ mode }) => {
         // The share-target POST must reach our own fetch handler, not the SPA
         // navigation fallback, which would swallow it and lose the files.
         navigateFallbackDenylist: [/^\/api\//, /^\/share-target/],
-        importScripts: ['/share-target.js'],
+        importScripts: ['/share-target.js', '/reminders.js'],
         runtimeCaching: [
           {
             // Our own copies. Nothing is fetched from jsdelivr or unpkg any

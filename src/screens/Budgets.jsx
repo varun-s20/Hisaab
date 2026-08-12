@@ -6,6 +6,8 @@ import CategoryIcon from '../components/CategoryIcon.jsx'
 import CategoryPicker from '../components/CategoryPicker.jsx'
 import ScreenHeader from '../components/ScreenHeader.jsx'
 import Amount from '../components/Amount.jsx'
+import Sheet, { EXIT } from '../components/Sheet.jsx'
+import Skeleton, { HeroSkeleton } from '../components/Skeleton.jsx'
 
 // The only number in the app the ledger cannot derive. Everything else answers
 // "what happened"; this is the one that answers "am I okay".
@@ -30,9 +32,11 @@ function Bar({ spent, limit, colour, dom, dim }) {
 export default function Budgets({ onBack }) {
   const [budgets, setBudgets] = useState(null)
   const [rows, setRows] = useState([])
-  const [adding, setAdding] = useState(false)
-  const [cat, setCat] = useState('')
-  const [amount, setAmount] = useState('')
+  // { category, amount, isNew } — one sheet does both jobs. It used to be an
+  // inline form under the cards, which left the whole month card and the
+  // category card sitting above a form that pushed the Save button off-screen
+  // on a phone; a sheet covers them the way every other form in the app does.
+  const [editing, setEditing] = useState(null)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
   const [confirming, setConfirming] = useState(null) // category awaiting a second tap
@@ -74,18 +78,12 @@ export default function Budgets({ onBack }) {
     return { dim, dom, list, total, overall: overall ? Number(overall.amount) : null }
   }, [budgets, rows])
 
-  async function save(e) {
-    e.preventDefault()
-    const n = Number(amount)
-    if (!cat) return setErr('Pick a category, or choose the whole month.')
-    if (!(n > 0)) return setErr('A monthly amount is needed.')
+  async function save(category, amount) {
     setBusy(true)
     setErr('')
     try {
-      await setBudget(cat, n)
-      setAdding(false)
-      setCat('')
-      setAmount('')
+      await setBudget(category, amount)
+      setEditing(null)
       await load()
     } catch (e2) {
       setErr(e2.message ?? String(e2))
@@ -110,8 +108,16 @@ export default function Budgets({ onBack }) {
 
   if (!budgets)
     return (
-      <div className="screen">
+      <div className="screen" role="status" aria-label="Loading your budgets">
         <ScreenHeader title="Budgets" onBack={onBack} />
+        {/* Only while it is still coming. A failure has its own card below and
+            must not sit under a placeholder that says "nearly there". */}
+        {!err && (
+          <>
+            <HeroSkeleton />
+            <Skeleton h={190} style={{ marginTop: 14 }} />
+          </>
+        )}
         {err && (
           <div className="card">
             <p className="empty" style={{ paddingBottom: 10 }}>
@@ -151,6 +157,41 @@ export default function Budgets({ onBack }) {
               <b className="num">{daysLeft}</b>
             </div>
           </div>
+          {/* The whole-month cap had no controls at all — it could be set once
+              and never changed or cleared, which is the one budget most likely
+              to be wrong on the first go. */}
+          {confirming === TOTAL_BUDGET ? (
+            <div className="brand-actions">
+              <p>Remove the whole-month budget?</p>
+              <div className="danger-actions">
+                <button type="button" className="btn ghost small" onClick={() => setConfirming(null)}>
+                  Keep it
+                </button>
+                <button type="button" className="btn small destructive" onClick={() => drop(TOTAL_BUDGET)}>
+                  Remove
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="brand-actions">
+              <div className="danger-actions">
+                <button
+                  type="button"
+                  className="btn ghost small"
+                  onClick={() => setEditing({ category: TOTAL_BUDGET, amount: String(view.overall) })}
+                >
+                  Edit
+                </button>
+                <button
+                  type="button"
+                  className="btn ghost small"
+                  onClick={() => setConfirming(TOTAL_BUDGET)}
+                >
+                  Remove
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -177,6 +218,12 @@ export default function Budgets({ onBack }) {
                   <div className="budgetrow-top">
                     <CategoryIcon category={b.category} className="tile sm" />
                     <span className="nm">{b.category}</span>
+                    <button
+                      className="btn ghost small"
+                      onClick={() => setEditing({ category: b.category, amount: String(b.amount) })}
+                    >
+                      Edit
+                    </button>
                     {/* Full 40px, not the 30px .sm — this deletes the only
                         number in the app the ledger cannot derive again. */}
                     <button
@@ -191,28 +238,26 @@ export default function Budgets({ onBack }) {
                     </button>
                   </div>
                   <Bar spent={b.spent} limit={b.amount} colour={colorFor(b.category)} dom={view.dom} dim={view.dim} />
-                  {/* Two steps, inline, over the row's own foot — the same shape
-                      as the delete in EditSheet, and no window.confirm freezing
-                      the page over a one-tap mistake. */}
+                  {/* The question sits on its own line above the buttons. Side
+                      by side they needed 320px and a phone card is under 300,
+                      so "Remove" wrapped onto a second row on its own and the
+                      pair stopped reading as one choice. */}
                   {confirming === b.category ? (
-                    <div
-                      className="danger-actions"
-                      style={{ justifyContent: 'flex-start', flexWrap: 'wrap', marginTop: 8 }}
-                    >
-                      <span className="muted" style={{ fontSize: 13, alignSelf: 'center' }}>
-                        Remove this budget?
-                      </span>
-                      <button type="button" className="btn ghost small" onClick={() => setConfirming(null)}>
-                        Keep it
-                      </button>
-                      <button
-                        type="button"
-                        className="btn small destructive"
-                        aria-label={`Remove budget for ${b.category}`}
-                        onClick={() => drop(b.category)}
-                      >
-                        Remove
-                      </button>
+                    <div className="confirmnote" style={{ margin: '10px 0 0', textAlign: 'left' }}>
+                      <p className="muted">Remove this budget?</p>
+                      <div className="danger-actions" style={{ justifyContent: 'flex-start' }}>
+                        <button type="button" className="btn ghost small" onClick={() => setConfirming(null)}>
+                          Keep it
+                        </button>
+                        <button
+                          type="button"
+                          className="btn small destructive"
+                          aria-label={`Remove budget for ${b.category}`}
+                          onClick={() => drop(b.category)}
+                        >
+                          Remove
+                        </button>
+                      </div>
                     </div>
                   ) : (
                     <div className="budgetrow-foot">
@@ -237,70 +282,117 @@ export default function Budgets({ onBack }) {
 
       {err && <p className="alert" style={{ fontSize: 14 }}>{err}</p>}
 
-      {adding ? (
-        <form className="panel" onSubmit={save}>
-          <div className="field">
-            <span>What</span>
-            {/* role="tab" without a tablist around it is invalid, and it is the
-                aria-selected the chip styling hangs off. Wrapped like Ledger's. */}
-            <div className="chips" role="tablist" aria-label="What to budget" style={{ marginBottom: 0 }}>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={cat === TOTAL_BUDGET}
-                onClick={() => setCat(TOTAL_BUDGET)}
-                disabled={taken.has(TOTAL_BUDGET)}
-              >
-                The whole month
-              </button>
-            </div>
-          </div>
-          <CategoryPicker
-            label="Or one category"
-            placeholder="Pick a category"
-            value={cat === TOTAL_BUDGET ? '' : cat}
-            onChange={setCat}
-          />
-          <label className="field">
-            <span>Monthly limit</span>
-            <input
-              type="number"
-              inputMode="decimal"
-              min="1"
-              className="num"
-              value={amount}
-              onChange={(e) => setAmount(e.target.value)}
-              placeholder="0"
-            />
-          </label>
-          <div className="newcat-actions" style={{ marginTop: 4 }}>
-            <button type="button" className="btn ghost small" onClick={() => setAdding(false)}>
-              Cancel
-            </button>
-            <button className="btn small" disabled={busy}>
-              {busy ? 'Saving…' : 'Set budget'}
-            </button>
-          </div>
-        </form>
-      ) : (
-        <button
-          className="btn ghost"
-          style={{ marginTop: 14 }}
-          disabled={free.length === 0 && taken.has(TOTAL_BUDGET)}
-          onClick={() => setAdding(true)}
-        >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-            <path d="M12 5v14M5 12h14" />
-          </svg>
-          Set a budget
-        </button>
-      )}
+      <button
+        className="btn ghost"
+        style={{ marginTop: 14 }}
+        disabled={free.length === 0 && taken.has(TOTAL_BUDGET)}
+        onClick={() => setEditing({ category: '', amount: '', isNew: true })}
+      >
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+          <path d="M12 5v14M5 12h14" />
+        </svg>
+        Set a budget
+      </button>
 
       <p className="muted" style={{ fontSize: 12, marginTop: 18, lineHeight: 1.6 }}>
-        Budgets are monthly and count spending only — transfers, refunds and money you
-        lent never touch them. The notch on each bar is where an even spend would put
-        you today.
+        Budgets are monthly and count spending only — transfers, refunds, investments and
+        money you lent never touch them. The notch on each bar is where an even spend
+        would put you today.
       </p>
+
+      {editing && (
+        <BudgetSheet
+          initial={editing}
+          busy={busy}
+          totalTaken={taken.has(TOTAL_BUDGET)}
+          onClose={() => setEditing(null)}
+          onSave={save}
+        />
+      )}
     </div>
+  )
+}
+
+/** Set or change one budget. Mounted only while open, so it always starts on
+ *  the values it was handed — same contract as EditSheet. */
+function BudgetSheet({ initial, busy, totalTaken, onClose, onSave }) {
+  const [cat, setCat] = useState(initial.category)
+  const [amount, setAmount] = useState(initial.amount)
+  const [err, setErr] = useState('')
+  const [showing, setShowing] = useState(true)
+
+  const finish = () => {
+    setShowing(false)
+    setTimeout(onClose, EXIT)
+  }
+
+  function submit(e) {
+    e.preventDefault()
+    const n = Number(amount)
+    if (!cat) return setErr('Pick a category, or choose the whole month.')
+    if (!(n > 0)) return setErr('A monthly amount is needed.')
+    onSave(cat, n)
+  }
+
+  const title = initial.isNew
+    ? 'Set a budget'
+    : cat === TOTAL_BUDGET
+      ? 'Whole-month budget'
+      : `${cat} budget`
+
+  return (
+    <Sheet open={showing} onClose={finish} title={title}>
+      <form onSubmit={submit}>
+        {initial.isNew && (
+          <>
+            <div className="field">
+              <span>What</span>
+              {/* role="tab" without a tablist around it is invalid, and it is
+                  the aria-selected the chip styling hangs off. */}
+              <div className="chips" role="tablist" aria-label="What to budget" style={{ marginBottom: 0 }}>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={cat === TOTAL_BUDGET}
+                  onClick={() => setCat(TOTAL_BUDGET)}
+                  disabled={totalTaken}
+                >
+                  The whole month
+                </button>
+              </div>
+            </div>
+            <CategoryPicker
+              label="Or one category"
+              placeholder="Pick a category"
+              value={cat === TOTAL_BUDGET ? '' : cat}
+              onChange={setCat}
+            />
+          </>
+        )}
+
+        <label className="field">
+          <span>Monthly limit</span>
+          <input
+            type="number"
+            inputMode="decimal"
+            min="1"
+            autoFocus={!initial.isNew}
+            className="num"
+            value={amount}
+            onChange={(e) => {
+              setAmount(e.target.value)
+              setErr('')
+            }}
+            placeholder="0"
+          />
+        </label>
+
+        {err && <p className="alert" style={{ fontSize: 14 }}>{err}</p>}
+
+        <button className="btn" disabled={busy}>
+          {busy ? 'Saving…' : initial.isNew ? 'Set budget' : 'Save'}
+        </button>
+      </form>
+    </Sheet>
   )
 }

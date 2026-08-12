@@ -12,8 +12,11 @@
 // new secret: the URL and the anon key are the same public values already
 // baked into the client bundle.
 
-const PROJECT = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL
-const ANON = process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY
+// Read per call, not at import. On Cloudflare the bindings only exist once a
+// request is in flight (see worker/index.js), so a module-level read here is
+// always undefined and the fail-closed branch below would reject every caller.
+const project = () => process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL
+const anon = () => process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY
 
 /**
  * True when the caller proved they are a signed-in user. Writes the error
@@ -27,6 +30,9 @@ export async function requireUser(req, res) {
     res.status(401).json({ error: 'sign in' })
     return false
   }
+
+  const PROJECT = project()
+  const ANON = anon()
 
   // Fail closed. A misconfigured deploy that silently accepted everyone would
   // be indistinguishable from no check at all.

@@ -75,5 +75,13 @@ async function serialise(file) {
   for (let i = 0; i < bytes.length; i += CHUNK) {
     binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK))
   }
-  return { name: file.name || 'screenshot.png', type: file.type, data: btoa(binary) }
+  // lastModified travels with it: the parser dates "Paid Today" against when
+  // the screenshot was taken, and a File rebuilt on the other side reports the
+  // moment it was rebuilt unless we carry the real one across.
+  return {
+    name: file.name || 'screenshot.png',
+    type: file.type,
+    lastModified: file.lastModified || 0,
+    data: btoa(binary),
+  }
 }

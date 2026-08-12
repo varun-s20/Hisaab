@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
-import { listMerchantMap, deleteMerchantMapping, recategoriseMerchant } from '../lib/db'
+import { listMerchantMap, deleteMerchantMapping, recategoriseByPattern } from '../lib/db'
 import { learn, clearMapCache, loadMerchantMap } from '../lib/categorise'
 import { TYPE_FOR_CATEGORY } from '../lib/seeds'
 import CategoryIcon from '../components/CategoryIcon.jsx'
 import CategoryPicker from '../components/CategoryPicker.jsx'
 import ScreenHeader from '../components/ScreenHeader.jsx'
+import { RowsSkeleton } from '../components/Skeleton.jsx'
 
 // What the app has learned, made visible. Until now merchant_map was invisible:
 // one wrong thing the AI decided would file that merchant wrongly forever, and
@@ -53,18 +54,26 @@ export default function Merchants({ onBack, onChange }) {
     if (!category || category === row.category) return
     setBusy(row.payee_pattern)
     try {
-      await learn(row.payee_clean || row.payee_pattern, {
+      // The pattern, not the clean name. learn() normalises whatever it is
+      // given, and normalise('Cafe Coffee Day') is not the pattern the row was
+      // stored under ('MSWIPECAFECOFFEE') — so correcting a mapping wrote a
+      // second map row and left the wrong one in place to keep winning.
+      await learn(row.payee_pattern, {
         category,
         payee_clean: row.payee_clean,
         source: 'user',
       })
-      await recategoriseMerchant(row.payee_pattern, {
+      const n = await recategoriseByPattern(row.payee_pattern, {
         category,
         payee_clean: row.payee_clean,
         type: TYPE_FOR_CATEGORY[category] ?? 'expense',
       })
       setRows((rs) => rs.map((r) => (r.payee_pattern === row.payee_pattern ? { ...r, category, source: 'user' } : r)))
-      setToast(`${row.payee_clean} is ${category} now, past payments included.`)
+      setToast(
+        n > 0
+          ? `${row.payee_clean} is ${category} now, past payments included.`
+          : `${row.payee_clean} is ${category} now. Nothing past to change.`,
+      )
       onChange?.()
     } catch (e) {
       setToast(e.message ?? String(e))
@@ -90,8 +99,9 @@ export default function Merchants({ onBack, onChange }) {
 
   if (!rows)
     return (
-      <div className="screen">
+      <div className="screen" role="status" aria-label="Loading what the app has learned">
         <ScreenHeader title="What it has learned" onBack={onBack} />
+        {!err && <RowsSkeleton rows={5} />}
         {err && (
           <div className="card">
             <p className="empty" style={{ paddingBottom: 10 }}>

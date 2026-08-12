@@ -1,4 +1,6 @@
 import { MODES, step, atLatest } from '../lib/range'
+import { today } from '../lib/format'
+import DateField from './DateField.jsx'
 
 // Day / Week / Month / Custom, with arrows to walk backwards through periods.
 // The label between the arrows is the whole point — "This week" and "Jul" tell
@@ -24,24 +26,19 @@ export default function RangePicker({ mode, setMode, anchor, setAnchor, custom, 
 
       {mode === 'custom' ? (
         <div className="customrange">
-          <label className="field">
-            <span>From</span>
-            <input
-              type="date"
-              value={custom.from}
-              max={custom.to}
-              onChange={(e) => setCustom({ ...custom, from: e.target.value })}
-            />
-          </label>
-          <label className="field">
-            <span>To</span>
-            <input
-              type="date"
-              value={custom.to}
-              min={custom.from}
-              onChange={(e) => setCustom({ ...custom, to: e.target.value })}
-            />
-          </label>
+          <DateField
+            label="From"
+            value={custom.from}
+            max={custom.to}
+            onChange={(v) => setCustom({ ...custom, from: v })}
+          />
+          <DateField
+            label="To"
+            value={custom.to}
+            min={custom.from}
+            max={today()}
+            onChange={(v) => setCustom({ ...custom, to: v })}
+          />
         </div>
       ) : (
         <div className="stepper">

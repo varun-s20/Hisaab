@@ -374,10 +374,79 @@ check('one offline question does not leak into the next', () => {
   assert.deepEqual(b.categories, ['Transport'])
 })
 
+check('a question word is not a merchant name', () => {
+  // Whatever survived the vocabulary used to become spec.merchant verbatim, so
+  // this filtered on a payee containing "major transaction", matched nothing,
+  // and Ask answered every such question with a confident ₹0.
+  const a = guess('what was my major transaction')
+  assert.equal(a.merchant, null)
+  assert.equal(a.sort, 'amount')
+  assert.deepEqual(a.types, []) // "transaction" means any kind, not just spend
+  const b = guess('biggest payment this month')
+  assert.equal(b.merchant, null)
+  assert.equal(b.sort, 'amount')
+  // A real merchant still survives.
+  assert.equal(guess('what did i spend at swiggy').merchant, 'swiggy')
+})
+
+check('an investment question asks for investments', () => {
+  assert.deepEqual(guess('how much did i invest last month').types, ['investment'])
+  assert.deepEqual(guess('total sip this year').types, ['investment'])
+  assert.deepEqual(guess('money received last 30 days').types, ['income', 'refund', 'repaid'])
+  assert.deepEqual(guess('how much on food').types, ['expense'])
+})
+
 check('a category name is text, not a pattern', () => {
   // A user-invented "Rent(" used to throw SyntaxError out of new RegExp and
   // wedge the Ask screen on its spinner with no way back.
   assert.doesNotThrow(() => guess('what did i spend', { methods: ['gpay('] }))
+})
+
+check('a relative date belongs to the screenshot, not to the upload', () => {
+  // Every payment app writes "Today" / "Yesterday", so the row is only as right
+  // as the clock it is resolved against. Today.jsx passes the file's
+  // lastModified, so a Tuesday screenshot dropped in on Wednesday is still
+  // Tuesday's payment.
+  const shot = `Payment history
+& Kunafa Mahal -394
+Paid Today, 07:18 PM From Axis
+@ Food`
+  const tue = new Date(2026, 7, 11) // Tue 11 Aug
+  const wed = new Date(2026, 7, 12)
+  assert.equal(parseScreenshot(shot, tue)[0].txn_date, '2026-08-11')
+  assert.equal(parseScreenshot(shot, wed)[0].txn_date, '2026-08-12')
+  assert.equal(parseScreenshot(shot, tue)[0].txn_time, '19:18:00')
+})
+
+// ── Reminders: only when there is something to say ─────────────────────────
+
+const { due, DEFAULTS } = await import('../src/lib/notify.js')
+
+check('a reminder fires once per period, and only when it is useful', () => {
+  const on = { ...DEFAULTS, enabled: true, dailyHour: 21 }
+  const first = new Date(2026, 8, 1, 9, 0) // 1 Sep, morning
+  const evening = new Date(2026, 8, 2, 21, 30)
+
+  // The 1st, with no whole-month budget set.
+  assert.deepEqual(due(on, { hasBudget: false }, first).map((r) => r.id), ['budget'])
+  // Already has one — nothing to ask for.
+  assert.deepEqual(due(on, { hasBudget: true }, first), [])
+  // Fired already this month.
+  assert.deepEqual(due({ ...on, shown: { budget: '2026-09' } }, { hasBudget: false }, first), [])
+
+  // The evening nudge, only on a day with nothing logged.
+  assert.deepEqual(due(on, { loggedToday: false }, evening).map((r) => r.id), ['daily'])
+  assert.deepEqual(due(on, { loggedToday: true }, evening), [])
+  // Too early.
+  assert.deepEqual(due(on, { loggedToday: false }, new Date(2026, 8, 2, 15, 0)), [])
+
+  // Sunday, and only if a queue is actually waiting.
+  const sunday = new Date(2026, 8, 6, 21, 30)
+  assert.ok(due(on, { loggedToday: true, reviewCount: 3 }, sunday).some((r) => r.id === 'weekly'))
+  assert.ok(!due(on, { loggedToday: true, reviewCount: 0 }, sunday).some((r) => r.id === 'weekly'))
+
+  // Off is off.
+  assert.deepEqual(due({ ...DEFAULTS, daily: false, monthly: false, weekly: false }, {}, evening), [])
 })
 
 // ── Statements: a sign is a direction ──────────────────────────────────────

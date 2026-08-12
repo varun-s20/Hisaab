@@ -27,7 +27,25 @@
         .dk-text { color: #f3f5f1 !important; }
         .dk-muted { color: #8f938c !important; }
         .dk-rule { border-color: #2c302a !important; }
+        /* The bright-green panel and the code block are brand surfaces, not
+           theme surfaces: they keep their colours in both schemes, and their
+           ink has to be pinned dark or a client's own dark transform lightens
+           it onto a still-light green and the heading disappears. */
+        .dk-panel { background: #9fe870 !important; }
+        .dk-ink { color: #10240a !important; }
+        .dk-ink-2 { color: #2a4a14 !important; }
+        .dk-keep { background: #e2f6d5 !important; color: #163300 !important; }
       }
+      /* Gmail app / Outlook.com dark mode. Neither honours the media query
+         above — both rewrite colours directly and mark what they changed with
+         data-ogsc (colour) and data-ogsb (background). These put the brand
+         surfaces back. */
+      [data-ogsc] .dk-panel,
+      [data-ogsb] .dk-panel { background: #9fe870 !important; }
+      [data-ogsc] .dk-ink { color: #10240a !important; }
+      [data-ogsc] .dk-ink-2 { color: #2a4a14 !important; }
+      [data-ogsc] .dk-keep,
+      [data-ogsb] .dk-keep { background: #e2f6d5 !important; color: #163300 !important; }
       @media (max-width: 480px) {
         .pad { padding-left: 22px !important; padding-right: 22px !important; }
         .code { font-size: 32px !important; letter-spacing: 0.16em !important; }
@@ -49,7 +67,7 @@
           <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width: 480px;">
             <tr>
               <td
-                class="pad"
+                class="pad dk-panel"
                 style="background: #9fe870; border-radius: 26px; padding: 26px 28px 24px; text-align: left;"
               >
                 <img
@@ -60,12 +78,14 @@
                   style="display: block; width: 52px; height: 52px; border-radius: 13px; border: 0; margin-bottom: 18px;"
                 />
                 <div
+                  class="dk-ink"
                   style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 27px; font-weight: 700; line-height: 1.14; letter-spacing: -0.03em; color: #163300;"
                 >
                   Welcome to Hisaab.<br />Your money, understood.
                 </div>
                 <div
-                  style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 13px; font-weight: 500; line-height: 1.5; color: #3d5c22; margin-top: 10px;"
+                  class="dk-ink-2"
+                  style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 13px; font-weight: 500; line-height: 1.5; color: #2a4a14; margin-top: 10px;"
                 >
                   One code and {{ .Email }} is your ledger. No password to invent.
                 </div>
@@ -87,7 +107,7 @@
                 </div>
 
                 <div
-                  class="code"
+                  class="code dk-keep"
                   style="font-family: 'SF Mono', SFMono-Regular, ui-monospace, Menlo, Consolas, monospace; font-size: 38px; font-weight: 700; letter-spacing: 0.2em; line-height: 1.1; color: #163300; background: #e2f6d5; border-radius: 14px; padding: 20px 12px; text-align: center; margin: 12px 0 0;"
                 >
                   {{ .Token }}

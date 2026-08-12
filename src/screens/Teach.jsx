@@ -5,6 +5,7 @@ import { postJson } from '../lib/api'
 import { CATEGORIES, allCategories } from '../lib/categories'
 import CategoryPicker from '../components/CategoryPicker.jsx'
 import ScreenHeader from '../components/ScreenHeader.jsx'
+import { RowsSkeleton } from '../components/Skeleton.jsx'
 import { seedLookup, TYPE_FOR_CATEGORY } from '../lib/seeds'
 import { money } from '../lib/format'
 
@@ -125,8 +126,16 @@ export default function Teach({ onChange, onBack }) {
     }
   }
 
-  // Blank until the first load lands. A load that failed is not still landing.
-  if (rows === null && !loadErr) return <div className="screen" />
+  // The first load also waits on the AI's guesses, which is the slowest thing
+  // in the app that isn't OCR — a blank screen for that long reads as broken.
+  if (rows === null && !loadErr) {
+    return (
+      <div className="screen" role="status" aria-label="Loading merchants to teach">
+        <ScreenHeader title="Teach me" onBack={onBack} />
+        <RowsSkeleton rows={4} />
+      </div>
+    )
+  }
 
   const more = (rows?.length ?? 0) - shown.length
 

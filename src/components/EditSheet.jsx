@@ -1,9 +1,11 @@
 import { useState } from 'react'
 import { updateTransaction, deleteTransaction } from '../lib/db'
 import { learn } from '../lib/categorise'
-import { TYPES } from '../lib/categories'
+import { TYPE_OPTIONS, DIRECTIONS, COUNTED } from '../lib/categories'
 import { today } from '../lib/format'
 import CategoryPicker from './CategoryPicker.jsx'
+import DateField from './DateField.jsx'
+import Select from './Select.jsx'
 import Sheet, { EXIT } from './Sheet.jsx'
 
 // Everything about a row, in one place. Before this the only editable fields
@@ -140,20 +142,16 @@ export default function EditSheet({ row, open, onClose, onSaved, onDeleted }) {
               onChange={(e) => set('amount', e.target.value)}
             />
           </label>
-          <label className="field">
-            <span>Direction</span>
-            <select value={d.direction} onChange={(e) => set('direction', e.target.value)}>
-              <option value="debit">Money out</option>
-              <option value="credit">Money in</option>
-            </select>
-          </label>
+          <Select
+            label="Direction"
+            value={d.direction}
+            options={DIRECTIONS}
+            onChange={(v) => set('direction', v)}
+          />
         </div>
 
         <div className="pair">
-          <label className="field">
-            <span>Date</span>
-            <input type="date" value={d.txn_date} onChange={(e) => set('txn_date', e.target.value)} />
-          </label>
+          <DateField value={d.txn_date} max={today()} onChange={(v) => set('txn_date', v)} />
           <label className="field">
             <span>Time</span>
             <input type="time" value={d.txn_time} onChange={(e) => set('txn_time', e.target.value)} />
@@ -168,24 +166,21 @@ export default function EditSheet({ row, open, onClose, onSaved, onDeleted }) {
         <CategoryPicker value={d.category} onChange={(c) => set('category', c)} />
 
         <div className="pair">
-          <label className="field">
-            <span>Type</span>
-            <select value={d.type} onChange={(e) => set('type', e.target.value)}>
-              {TYPES.map((t) => (
-                <option key={t} value={t}>{t}</option>
-              ))}
-            </select>
-          </label>
-          <label className="field">
-            <span>Paid with</span>
-            <select value={d.method} onChange={(e) => set('method', e.target.value)}>
-              <option value="">Not recorded</option>
-              {METHODS.map((m) => (
-                <option key={m} value={m}>{m}</option>
-              ))}
-            </select>
-          </label>
+          <Select label="Type" value={d.type} options={TYPE_OPTIONS} onChange={(v) => set('type', v)} />
+          <Select
+            label="Paid with"
+            value={d.method}
+            placeholder="Not recorded"
+            options={[{ value: '', label: 'Not recorded' }, ...METHODS]}
+            onChange={(v) => set('method', v)}
+          />
         </div>
+
+        {!COUNTED.has(d.type) && (
+          <p className="warn" style={{ fontSize: 12.5, margin: '-10px 0 16px' }}>
+            A {d.type} is your own money moving — this row is in no total on any screen.
+          </p>
+        )}
 
         <label className="field">
           <span>Account — which card or bank, if it matters</span>

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 
 // Bottom sheet. Transitions rather than keyframes, so opening one while another
 // is closing retargets instead of restarting. Exit runs at ~65% of enter — slow
@@ -142,7 +143,20 @@ export default function Sheet({ open, onClose, title, children }) {
 
   if (!mounted) return null
 
-  return (
+  // Portalled to <body>, because a sheet is rendered from wherever it is opened
+  // and that is often inside a <form>: ManualEntry, EditSheet and the budget
+  // sheet all open the category picker from inside theirs, which put a <form>
+  // inside a <form>. Invalid HTML, and Chrome says so.
+  //
+  // It also means the sheet is no longer a descendant of .screen, so nothing an
+  // ancestor does — a transform, an opacity animation, a stacking context —
+  // can move a position:fixed scrim out from under it.
+  //
+  // React events still bubble through the React tree, not the DOM one, so a
+  // submit inside a portalled form would still reach an outer form's onSubmit.
+  // Nothing nested is a <form> any more (see CategoryPicker), which is what
+  // actually settles that half.
+  return createPortal(
     <div className="sheet-root" data-open={shown}>
       <button className="sheet-scrim" aria-label="Close" onClick={close} />
       <div
@@ -165,6 +179,7 @@ export default function Sheet({ open, onClose, title, children }) {
         </div>
         <div className="sheet-body">{children}</div>
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }

@@ -41,6 +41,27 @@ export async function readImage(file) {
   // This is the privacy guarantee. Do not add a storage call.
 }
 
+/**
+ * When the screenshot was taken, as far as the file knows.
+ *
+ * This is what "Paid Today, 07:18 AM" has to be resolved against. Every payment
+ * app writes the date relatively, so a Tuesday screenshot uploaded on Wednesday
+ * was being read as Wednesday's payment — the row was right about everything
+ * except the one field the screenshot never states outright.
+ *
+ * Falsy, absurdly old, or in the future means the browser has nothing real (a
+ * File rebuilt from bytes reports 0 or now); fall back to the clock, which is
+ * where this started.
+ */
+function takenAt(file) {
+  const ms = Number(file?.lastModified)
+  const now = Date.now()
+  if (!Number.isFinite(ms) || ms <= 0 || ms > now + 60_000) return new Date(now)
+  // Older than two years is a copied or re-encoded file whose stamp is junk.
+  if (now - ms > 2 * 365 * 86400_000) return new Date(now)
+  return new Date(ms)
+}
+
 export async function readBatch(files, onProgress) {
   const results = []
   for (let i = 0; i < files.length; i++) {
@@ -50,7 +71,7 @@ export async function readBatch(files, onProgress) {
     } catch {
       text = '' // A dud image shouldn't kill the batch; it lands as unreadable.
     }
-    results.push({ name: files[i].name, text })
+    results.push({ name: files[i].name, text, when: takenAt(files[i]) })
     onProgress?.(i + 1, files.length)
   }
   return results

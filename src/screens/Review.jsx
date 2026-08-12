@@ -1,10 +1,13 @@
 import { useEffect, useState } from 'react'
 import { listNeedsReview, updateTransaction, deleteTransaction } from '../lib/db'
 import { learn } from '../lib/categorise'
-import { TYPES } from '../lib/categories'
-import { money } from '../lib/format'
+import { TYPE_OPTIONS, DIRECTIONS, COUNTED } from '../lib/categories'
+import { money, today } from '../lib/format'
 import CategoryPicker from '../components/CategoryPicker.jsx'
+import DateField from '../components/DateField.jsx'
+import Select from '../components/Select.jsx'
 import ScreenHeader from '../components/ScreenHeader.jsx'
+import { PanelSkeleton } from '../components/Skeleton.jsx'
 
 // What the parser handed us, shaped for inputs. Blank means it couldn't read it —
 // never a blank form, only the blanks that are genuinely blank.
@@ -139,6 +142,15 @@ export default function Review({ onChange, onBack }) {
         </div>
       )}
 
+      {/* rows is null until the first load lands — the screen was a bare title
+          on a slow connection, which reads as "nothing here". */}
+      {!rows && !loadErr && (
+        <div role="status" aria-label="Loading rows to check">
+          <PanelSkeleton fields={4} />
+          <PanelSkeleton fields={3} />
+        </div>
+      )}
+
       {rows && n === 0 && (
         <div className="card">
           <p className="empty">Nothing needs a look.</p>
@@ -178,14 +190,12 @@ export default function Review({ onChange, onBack }) {
               />
             </label>
 
-            <label className="field">
-              <span>Date</span>
-              <input
-                type="date"
-                value={d.txn_date}
-                onChange={(e) => set(t.id, 'txn_date', e.target.value)}
-              />
-            </label>
+            <DateField
+              label="Date — the app fills in today when it couldn’t read one"
+              value={d.txn_date}
+              max={today()}
+              onChange={(v) => set(t.id, 'txn_date', v)}
+            />
 
             <label className="field">
               <span>Time (optional)</span>
@@ -207,24 +217,35 @@ export default function Review({ onChange, onBack }) {
 
             <CategoryPicker value={d.category} onChange={(c) => set(t.id, 'category', c)} />
 
-            <label className="field">
-              <span>Type</span>
-              <select value={d.type} onChange={(e) => set(t.id, 'type', e.target.value)}>
-                {TYPES.map((ty) => (
-                  <option key={ty} value={ty}>
-                    {ty}
-                  </option>
-                ))}
-              </select>
-            </label>
+            {/* Direction first, because it decides the type. A row the parser
+                couldn't price arrives typed by the cascade — an unrecognised
+                credit is a 'transfer' — and a transfer counts in no total on
+                any screen. Six confirmed payments landing in none of the app's
+                figures is exactly that, so switching direction now moves the
+                type with it instead of leaving a trap behind. */}
+            <Select
+              label="Direction"
+              value={d.direction}
+              options={DIRECTIONS}
+              onChange={(dir) => {
+                set(t.id, 'direction', dir)
+                if (!COUNTED.has(d.type)) set(t.id, 'type', dir === 'credit' ? 'income' : 'expense')
+              }}
+            />
 
-            <label className="field">
-              <span>Direction</span>
-              <select value={d.direction} onChange={(e) => set(t.id, 'direction', e.target.value)}>
-                <option value="debit">Money out</option>
-                <option value="credit">Money in</option>
-              </select>
-            </label>
+            <Select
+              label="Type"
+              value={d.type}
+              options={TYPE_OPTIONS}
+              onChange={(v) => set(t.id, 'type', v)}
+            />
+            {!COUNTED.has(d.type) && (
+              <p className="warn" style={{ fontSize: 12.5, margin: '-10px 0 16px' }}>
+                A {d.type} is your own money moving, so this row will be in no total
+                anywhere. Pick {d.direction === 'credit' ? 'income' : 'expense'} if it was a
+                real {d.direction === 'credit' ? 'payment to you' : 'payment'}.
+              </p>
+            )}
 
             <details style={{ marginBottom: 16 }}>
               <summary className="linkish" style={{ cursor: 'pointer' }}>
