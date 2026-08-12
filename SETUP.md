@@ -51,8 +51,16 @@ constraint — so on an existing database this is what adds:
 It ends with a `select` that should return **zero rows**. Anything it returns
 still has both halves of a transfer in one cell.
 
+**Then run `db/migrate-access-status.sql`.** This is what turns
+`access_requests` from a list into a queue: `status`, `decided_at` and
+`notified_at`, and it drops the public INSERT policy the browser used to write
+through. Run it on a fresh database too — `db/schema.sql` still creates the
+table the old way. Safe to run twice.
+
 Verify: **Table Editor** should now show `transactions`, `merchant_map`,
 `budgets` and `access_requests`, all with a green "RLS enabled" badge.
+`access_requests` should have **no policies at all** — that is correct now, and
+means nothing holding the anon key can read or write it.
 
 ---
 
@@ -87,9 +95,9 @@ Without either, anyone with an email address can create an account — and an
 account is a token, and a token passes `api/_auth.js` and spends your
 `GEMINI_API_KEY` on every call it likes.
 
-**What someone new sees.** They type their address, get
-*"Hisaab is invite-only. Your request has been noted"*, and a row lands in
-`access_requests`.
+**What someone new sees.** They type their address, get *"Hisaab is invite-only.
+You're on the waiting list — you'll usually hear back within 24–72 hours"*, and
+a row lands in `access_requests` — written by the Worker, not the browser.
 
 **This screen does tell a stranger whether an address has an account** — a known
 one goes to the code field, an unknown one gets the invite-only line. That is
@@ -100,27 +108,55 @@ an attacker no closer to the mailbox, which is the only key. If you ever want it
 closed, show the "check your email" line unconditionally and drop the request
 flow — you cannot have both.
 
-**How you approve, start to finish:**
+**How you approve: from your inbox.** You no longer open the dashboard for this.
 
-1. **Table Editor → `access_requests`** — the queue. Sorted newest last.
-2. Decide. If you don't recognise the address, do nothing; nothing happens.
-3. **Authentication → Users → Add user → Send invitation**, using the same
-   address. No password to invent, and the invite link works on its own —
-   `detectSessionInUrl` is on in `src/lib/supabase.js`.
-   *Prefer `Create new user` with `Auto Confirm User` if you'd rather they never
-   get a link at all; you'll have to type a throwaway password they will never
-   use, because sign-in is by code.*
-4. Tell them they're in. They enter the same address and now get a code.
-5. Delete the row from `access_requests`. Nothing reads it, so this is only
-   housekeeping — but a queue you clear is a queue you can trust.
+1. They ask. `POST /api/access-request` writes the row and emails **you** at
+   `ADMIN_EMAIL` — the address, when they asked, and two buttons.
+2. Tap **Approve** or **Reject**. The link opens a page on your own domain that
+   shows the address again with both buttons on it. **Opening the link decides
+   nothing** — see below.
+3. Press the button on that page. Approve creates the account and emails them a
+   magic link (plus the code route underneath it, because on Android a link may
+   open in the wrong browser). Reject emails a short decline.
+4. Nothing to clean up. The row keeps its verdict, which is what stops the same
+   address mailing you twice and what lets a rejected person ask again later.
+
+Ignoring the mail is still a valid answer: the request stays `pending` forever
+and the links expire after 7 days.
+
+**Why opening the link is safe.** Mail clients, antivirus proxies and corporate
+link scanners fetch URLs out of inboxes without anyone tapping them. If the link
+itself approved, the first such fetch would approve whoever had just asked, and
+nothing would look wrong. So the `GET` only renders; the decision is a form
+`POST` from a button on that page. `scripts/test-access.mjs` asserts exactly
+this — that a `GET` on the decide route mutates nothing at all.
+
+**Why the link can't be forged.** It carries
+`base64url(payload).base64url(HMAC-SHA256(payload, APPROVE_SECRET))`, with the
+expiry inside the signed bytes. Edit the request id in it and the signature
+stops matching. Once a decision is recorded the row is no longer `pending`, so a
+forwarded mail cannot replay it. `scripts/test-token.mjs` covers the tampering,
+expiry and wrong-secret cases.
+
+**Rate limits**, because `/api/access-request` is unauthenticated by nature —
+the caller has no account, that is the point:
+- one admin email per address per 24 hours, however often they ask
+- at most 20 admin emails an hour across every address, which is the cap that
+  survives a script feeding it a fresh random address every second
+
+Both are plain SQL against `access_requests`. Neither is visible to the person
+asking: they get the same waiting-list line either way.
 
 **To revoke:** Authentication → Users → delete the user. Their rows go with
-them; every table is `references auth.users(id)`.
+them; every table is `references auth.users(id)`. Also set that row's `status`
+back to `pending` (or delete it) if you want them able to ask again.
 
-**Note the table is insert-only.** `db/schema.sql` grants INSERT and no SELECT,
-so nobody — signed in or not — can read the list back through the API. Only the
-dashboard can, because it uses the service role and bypasses RLS. That is why
-there is no admin screen in the app to build, secure, or forget about.
+**Nothing in the browser can read or write this table.** `db/schema.sql` once
+granted a public INSERT; `db/migrate-access-status.sql` drops it and replaces it
+with nothing, so with RLS on and no policies the table is unreachable from the
+anon key in either direction. The Worker writes it with the service role. That
+is why there is still no admin screen in the app to build, secure, or forget
+about — the admin screen is your inbox.
 
 ### 3b. Tell Supabase which URLs are allowed
 

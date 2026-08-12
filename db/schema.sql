@@ -99,34 +99,41 @@ create table if not exists budgets (
 -- ── Access requests: the approval queue ───────────────────────────────────
 -- Sign-up is not self-service. Someone who is not a user types their address
 -- into the sign-in screen, Supabase refuses to create an account, and the app
--- drops a row here instead (src/screens/SignIn.jsx).
+-- asks /api/access-request to record it (src/screens/SignIn.jsx).
 --
--- You read it in Table Editor and create the account in Authentication → Users.
--- That is the entire admin tool: the dashboard uses the service role, which
--- bypasses RLS, so there is no admin screen and no second role in the app.
+-- The Worker writes this table with the service role, emails you two signed
+-- Approve / Reject links, and records the verdict. See worker/access.js and
+-- SETUP-APPROVALS.md.
 create table if not exists access_requests (
   id         uuid primary key default gen_random_uuid(),
   email      text not null unique check (length(email) between 3 and 254),
-  created_at timestamptz default now()
+  created_at timestamptz default now(),
+  -- The queue columns. Repeated in db/migrate-access-status.sql, which is what
+  -- adds them to a table that already exists — `create table if not exists`
+  -- will not add a column to one that is already there.
+  status     text not null default 'pending'
+             check (status in ('pending', 'approved', 'rejected')),
+  decided_at timestamptz,
+  notified_at timestamptz
 );
 
 alter table access_requests enable row level security;
 
--- Its RLS lives here rather than in the block below because it is the one table
--- in this schema that is not keyed to a user: the whole point is that the
--- person filling it in does not have an account yet.
+-- ── No policies. That is the intended state, not an omission. ──
 --
--- INSERT and nothing else. No select policy means no select — not for anon, not
--- for a signed-in user, not for the person who just wrote the row. An address
--- goes in and only the dashboard can read it back.
+-- RLS on with zero policies means the anon key can neither read nor write this
+-- table. The service role bypasses RLS, so worker/access.js is the only thing
+-- that touches it — which is where the address validation and the two mail rate
+-- limits live.
 --
--- ponytail: a public insert is spammable. The unique index makes repeats a
--- no-op, which covers the accidental case; if a bot ever floods it with random
--- addresses, put Cloudflare Turnstile in front of the ask or move the insert
--- behind a Worker route that rate-limits by IP.
+-- It used to carry a public INSERT policy so the browser could write the row
+-- directly. That made it the one publicly writable table in the schema: anyone
+-- with the anon key (it ships in the bundle — it is meant to) could insert
+-- without limit. The drop below is therefore load-bearing, and it is here as
+-- well as in the migration because SETUP.md tells you re-running this file is
+-- safe. Without it, one re-run would silently reopen the hole on a database
+-- that had already been migrated.
 drop policy if exists "anyone may ask" on access_requests;
-create policy "anyone may ask" on access_requests
-  for insert to anon, authenticated with check (true);
 
 -- ── Row level security: nobody sees anyone else's money ───────────────────
 -- Migration for a database created before unreadable rows were stored rather

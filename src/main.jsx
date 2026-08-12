@@ -2,6 +2,10 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import App from './App.jsx'
 import './styles.css'
+// Side effect only. `beforeinstallprompt` fires as soon as the page is eligible
+// to be installed, which on a cold load is before React has mounted — a
+// listener added inside a component has already missed it. See src/lib/install.js.
+import './lib/install'
 
 createRoot(document.getElementById('root')).render(
   <StrictMode>

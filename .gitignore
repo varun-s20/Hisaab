@@ -18,4 +18,9 @@ screenshots/*
 ref/*
 !ref/README.md
 
+# Working notes — the audit, design specs. Kept local: the audit names the
+# weaknesses that are still open (docs/AUDIT.md "Not fixed"), which is a map
+# for anyone who finds this repo. Setup lives in SETUP*.md, which is committed.
+docs/
+
 .DS_Store

@@ -11,10 +11,40 @@
 //   SUPABASE_ANON_KEY   same value as VITE_SUPABASE_ANON_KEY
 // The two Supabase values are already public in the browser bundle — they are
 // here so api/_auth.js can verify the caller's token the way Vercel does.
+//
+// And, for the approval queue in worker/access.js:
+//   SUPABASE_SERVICE_ROLE_KEY  creates accounts and bypasses RLS. This one is
+//                              NOT public — it belongs here and nowhere else.
+//   APPROVE_SECRET             signs the Approve / Reject links
+//   RESEND_API_KEY             sends the three emails that are not Supabase's
+//   MAIL_FROM                  e.g. "Hisaab <hello@yourdomain.com>"
+//   ADMIN_EMAIL                where the "someone wants in" mail lands
+//   SITE_URL                   absolute, no trailing slash — the links in those
+//                              emails have to point somewhere real
+// See SETUP-APPROVALS.md.
 {
   "name": "hisaab",
   "compatibility_date": "2026-08-12",
   "main": "worker/index.js",
+  // The app is served from hisaab.broombuilds.com and nowhere else.
+  //
+  // Both of these default to TRUE when absent, so every `wrangler deploy`
+  // silently re-enabled them and put the whole app back on
+  // hisaab.<account>.workers.dev — a second public address for an invite-only
+  // app, outside the domain, that nobody would think to check.
+  //
+  // preview_urls is the worse of the two: it publishes *-hisaab.<account>
+  // .workers.dev for every version ever deployed, so a build you rolled back
+  // stays reachable at its own URL. Turning it off here is what makes the
+  // setting stick across deploys.
+  "workers_dev": false,
+  "preview_urls": false,
+  // With both off and no `routes` here, deploy prints "No targets deployed".
+  // That is expected, not a failure: hisaab.broombuilds.com is attached as a
+  // Custom Domain in the dashboard, which is a separate resource wrangler does
+  // not manage, and it keeps serving. Declare it here —
+  //   "routes": [{ "pattern": "hisaab.broombuilds.com", "custom_domain": true }]
+  // — if you ever want a fresh checkout to be able to recreate the binding.
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS",

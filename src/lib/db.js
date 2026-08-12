@@ -387,6 +387,17 @@ const forgetAccounts = () => {
   methodCache = null
 }
 
+/**
+ * The same wipe, for a change of user rather than a change of row.
+ *
+ * These caches are somebody's bank, card and envelope names, held in a module
+ * variable that survives a sign-out — the tab is never reloaded, App.jsx just
+ * swaps the screen. Signing in as someone else therefore showed the previous
+ * person's accounts in every picker, and Ask sent them to the model as the new
+ * person's (src/screens/Ask.jsx passes listAccounts() straight to /api/ask).
+ */
+export const forgetCaches = forgetAccounts
+
 export async function listNeedsReview() {
   const { data, error } = await withToAccount((cols) =>
     supabase

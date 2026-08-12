@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { supabase, configured } from '../lib/supabase'
+import InstallButton from '../components/InstallButton.jsx'
 
 // The app icon itself, not a second copy of the artwork — it is already
 // precached, so the sign-in screen paints instantly and offline. Sits on the
@@ -65,18 +66,30 @@ export default function SignIn() {
   }
 
   /**
-   * Record the request and say so. The row is the whole approval flow: nothing
-   * can read `access_requests` back through the API (db/schema.sql grants
-   * INSERT and nothing else), so the admin reads it in the Supabase dashboard
-   * and creates the account there. No admin screen, no second role to get wrong.
+   * Record the request and say so.
+   *
+   * This used to be a direct insert with the anon key, which meant the one
+   * publicly writable table in the schema. It now goes through the Worker
+   * (worker/access.js), which writes it with the service role, caps how much
+   * mail it can cause, and emails the admin two signed Approve / Reject links.
+   *
+   * The line below is the same however the ask lands — new, already pending,
+   * rejected last week, or the endpoint being down. A stranger learns only that
+   * the door is closed, and anyone may knock again.
    */
   async function askForAccess(address) {
-    // A repeat ask hits the unique index on email. That is not a failure — it
-    // means the request is already sitting there — so the line is the same
-    // either way, and the error is deliberately not shown.
-    await supabase.from('access_requests').insert({ email: address })
+    try {
+      await fetch('/api/access-request', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: address }),
+      })
+    } catch {
+      // Offline, or the Worker is down. Telling them to try again later is no
+      // more useful than the waiting-list line they are about to read.
+    }
     setNote(
-      'Hisaab is invite-only. Your request has been noted — you’ll be able to sign in once it’s approved.',
+      'Hisaab is invite-only. You’re on the waiting list — you’ll usually hear back within 24–72 hours.',
     )
   }
 
@@ -221,6 +234,13 @@ export default function SignIn() {
 
         {note && <p className="muted" style={{ fontSize: 14 }}>{note}</p>}
         {msg && <p className="alert" style={{ fontSize: 14 }}>{msg}</p>}
+
+        {/* Below the fold of the form on purpose. Signing in is why they came;
+            installing is the thing they'd otherwise have to find under Chrome's
+            three dots. Renders nothing where it can't work — see the component. */}
+        <div style={{ marginTop: 28 }}>
+          <InstallButton />
+        </div>
       </div>
     </div>
   )

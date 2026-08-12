@@ -1,11 +1,13 @@
 import { Component, Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react'
 import { supabase, configured } from './lib/supabase'
-import { countNeedsReview, countUntaught, listTransactions, listBudgets, TOTAL_BUDGET } from './lib/db'
+import { countNeedsReview, countUntaught, listTransactions, listBudgets, forgetCaches, TOTAL_BUDGET } from './lib/db'
+import { setOwner } from './lib/categories'
 import { loadMerchantMap, clearMapCache } from './lib/categorise'
 import { today } from './lib/format'
 import * as notify from './lib/notify'
 import Nav, { TABS, SUB } from './components/Nav.jsx'
 import Select from './components/Select.jsx'
+import InstallButton from './components/InstallButton.jsx'
 import SignIn from './screens/SignIn.jsx'
 import Today from './screens/Today.jsx'
 import Ledger from './screens/Ledger.jsx'
@@ -62,10 +64,20 @@ export default function App() {
 
   useEffect(() => {
     if (!configured) return setSession(null)
-    supabase.auth.getSession().then(({ data }) => setSession(data.session))
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session)
+      setOwner(data.session?.user?.id)
+    })
     const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => {
       setSession(s)
+      // Everything held outside React that belongs to a person rather than to
+      // the app. The tab is never reloaded between two sign-ins, so none of
+      // this clears itself: the merchant map, the derived account and method
+      // lists, and the custom categories in localStorage would all carry over
+      // to whoever signs in next on a shared phone.
       clearMapCache()
+      forgetCaches()
+      setOwner(s?.user?.id)
     })
     return () => sub.subscription.unsubscribe()
   }, [])
@@ -377,6 +389,12 @@ function More({ go, email, reviewCount, untaughtCount }) {
           ))}
         </ul>
       </div>
+
+      {/* Above Reminders because reminders only survive a closed browser once
+          the app is installed — offering the fix before the feature that needs
+          it saves a round trip through the three-dots menu. Both this heading
+          and the button vanish when there is nothing to install. */}
+      <InstallButton heading="The app" />
 
       <h2 className="section">Reminders</h2>
       <Reminders />

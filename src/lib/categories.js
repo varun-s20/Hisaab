@@ -78,6 +78,12 @@ export const CATEGORY_ICON = {
 // only the picker list, which is a preference. Move it to a `categories` table
 // the day you want the list itself to sync.
 const KEY = 'hisaab.categories'
+// Who the list on this device belongs to. Custom category names are not a
+// neutral preference — "Therapy", "Mum's medicines", "Divorce lawyer" — and
+// localStorage outlives a sign-out. Without this, the next person to sign in on
+// a shared phone gets the last one's list in every picker, and Ask sends it to
+// the model as if it were theirs (see allCategories() in src/screens/Ask.jsx).
+const OWNER = 'hisaab.categories.owner'
 
 let cache = null
 
@@ -97,6 +103,31 @@ function read() {
 function write(next) {
   cache = next
   localStorage.setItem(KEY, JSON.stringify(next))
+}
+
+/**
+ * Called on every auth change with the signed-in user's id. A different owner
+ * than the one this device last saw means the list belongs to someone else:
+ * drop it rather than show it to whoever just signed in.
+ *
+ * Signing out passes nothing and wipes nothing — the same person signing back
+ * in keeps their list. It goes when a *different* account arrives.
+ *
+ * ponytail: the list is lost when a device changes hands, because it lives on
+ * the device. Move it to a `categories` table if it should follow the account
+ * instead — the category value is already on every row, so only the picker
+ * list is at stake.
+ */
+export function setOwner(userId) {
+  if (!userId) return
+  try {
+    if (localStorage.getItem(OWNER) === userId) return
+    localStorage.removeItem(KEY)
+    localStorage.setItem(OWNER, userId)
+  } catch {
+    // Storage blocked. Nothing was persisted to leak in the first place.
+  }
+  cache = null
 }
 
 /** [{ name, color }] — the ones the user made. */

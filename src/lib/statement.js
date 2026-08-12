@@ -36,7 +36,12 @@ export function parseCSV(text, delim = ',') {
   }
   if (field !== '' || row.length) { row.push(field); rows.push(row) }
 
-  return rows.filter((r) => r.some((f) => f.trim() !== ''))
+  // Undo the formula guard lib/csv.js writes, so exporting and re-importing
+  // gives the name back rather than a stray apostrophe. Narrow on purpose: an
+  // apostrophe followed by one of these characters is an escape, never a name.
+  const unguard = (f) => (/^'[=+@\t\r-]/.test(f) ? f.slice(1) : f)
+
+  return rows.filter((r) => r.some((f) => f.trim() !== '')).map((r) => r.map(unguard))
 }
 
 /** Bank "text exports" are often tab or pipe separated. Comma wins ties. */

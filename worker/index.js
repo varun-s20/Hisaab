@@ -13,6 +13,8 @@
 
 import ask from '../api/ask.js'
 import categorise from '../api/categorise.js'
+import { handleAccess } from './access.js'
+import { handleInbound } from './inbound.js'
 
 const ROUTES = {
   '/api/ask': ask,
@@ -92,6 +94,51 @@ function makeRes() {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url)
+
+    // The approval routes speak native Request/Response and need the real env
+    // (service role, Resend key) rather than the process.env bridge below, so
+    // they are handled before the Vercel-shaped adapter gets involved.
+    //
+    // The Origin check applies to the POST only. /api/access-decide is opened
+    // by tapping a link in a mail client, and a top-level GET navigation
+    // carries no Origin header at all — checking it there would reject the one
+    // request the route exists to serve.
+    // Resend's inbound webhook. Deliberately outside the Origin check below:
+    // it is a server-to-server POST that carries no Origin header, and it
+    // authenticates itself with a signature over the raw body, which is a
+    // stronger claim than any header a browser attaches.
+    if (url.pathname === '/api/inbound') {
+      try {
+        return await handleInbound(request, env)
+      } catch (e) {
+        console.error('[inbound]', e?.message ?? e)
+        // 500 rather than 200: Svix retries this, and a transient failure
+        // should not silently eat somebody's email.
+        return new Response('failed', { status: 500 })
+      }
+    }
+
+    if (url.pathname === '/api/access-request' || url.pathname === '/api/access-decide') {
+      if (request.method === 'POST' && foreignOrigin(request)) {
+        return new Response(JSON.stringify({ error: 'not allowed from here' }), {
+          status: 403,
+          headers: { 'content-type': 'application/json' },
+        })
+      }
+      try {
+        const answer = await handleAccess(request, env, url)
+        if (answer) return answer
+      } catch (e) {
+        // Supabase or Resend unreachable. The admin route is a page a person is
+        // looking at, so it gets a sentence rather than a JSON blob.
+        console.error('[access]', e?.message ?? e)
+        return new Response('Something broke on our side. Nothing was changed.', {
+          status: 500,
+          headers: { 'content-type': 'text/plain; charset=utf-8' },
+        })
+      }
+    }
+
     const handler = ROUTES[url.pathname]
 
     // run_worker_first is scoped to /api/* in wrangler.jsonc, so this is only

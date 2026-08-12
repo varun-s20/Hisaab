@@ -28,11 +28,32 @@ const HEADERS = [
 ]
 
 /**
+ * A cell a spreadsheet would evaluate rather than display.
+ *
+ * Excel, LibreOffice and Sheets all treat a cell starting `= + @` — and a tab
+ * or carriage return — as a formula, and RFC-4180 quoting does NOT stop it: the
+ * quotes are consumed as CSV syntax and what is left is evaluated. A leading
+ * apostrophe is what marks the value as literal text.
+ *
+ * This is not theoretical here. `payee_raw` is OCR'd off a payment screenshot,
+ * and the display name in that screenshot is chosen by whoever you paid — so a
+ * merchant can pick a name that runs when you open your own export. `note` and
+ * the account names carried in by an import are the same shape of problem.
+ *
+ * A leading `-` is left alone when the cell is a real negative number, which is
+ * an ordinary value in a ledger, not an attack.
+ */
+const evaluates = (s) => /^[=+@\t\r]/.test(s) || (s.startsWith('-') && Number.isNaN(Number(s)))
+
+/**
  * RFC-4180. Everything is quoted rather than only the fields that need it —
  * the cost is a few bytes, and the alternative is deciding per cell whether a
  * merchant name contains a comma. `"` doubles.
  */
-const cell = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`
+const cell = (v) => {
+  const s = String(v ?? '')
+  return `"${(evaluates(s) ? `'${s}` : s).replace(/"/g, '""')}"`
+}
 
 export function toCSV(rows) {
   const lines = [HEADERS.map(([h]) => cell(h)).join(',')]

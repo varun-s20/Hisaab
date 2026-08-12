@@ -637,6 +637,24 @@ check('an export re-imports as the same rows', () => {
   assert.equal(rows[1].category_hint, 'Income')
 })
 
+check('an exported merchant name cannot run as a spreadsheet formula', () => {
+  // The display name on a UPI screenshot is chosen by whoever you paid, is
+  // OCR'd into payee_raw, and ends up in your export. Excel and Sheets evaluate
+  // a cell starting = + @ even inside quotes, so the leading apostrophe is the
+  // only thing standing between a merchant and code running on your machine.
+  const out = toCSV([
+    { txn_date: '2026-08-01', payee_raw: '=HYPERLINK("http://evil","Click")', amount: 10, note: '@SUM(A1)' },
+  ])
+  assert.equal(out.includes('"\'=HYPERLINK'), true, 'a formula must be prefixed')
+  assert.equal(out.includes('"\'@SUM(A1)"'), true, 'so must a note')
+  // A real negative number is a value, not an attack, and stays untouched.
+  assert.equal(toCSV([{ txn_date: '2026-08-01', note: '-42' }]).includes('"-42"'), true)
+
+  // …and the guard comes back off on re-import, so the round trip still holds.
+  const { rows } = parseStatement(out, { now: new Date(2026, 7, 12) })
+  assert.equal(rows[0].payee_raw, '=HYPERLINK("http://evil","Click")')
+})
+
 check("another app's category vocabulary maps onto ours", () => {
   assert.equal(my[0].category_hint, 'Education') // already one of the fourteen
   assert.equal(my[2].category_hint, 'Food & Dining') // 'Food' is not

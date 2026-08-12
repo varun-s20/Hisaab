@@ -1,0 +1,155 @@
+// The approval routes, driven against a stubbed fetch.
+//
+// The assertion that earns this file is `mutating()`: opening an Approve link
+// must create nothing, mail nobody and change no row. Mail clients, antivirus
+// proxies and link scanners fetch URLs out of inboxes unprompted, so the day
+// that GET starts deciding is the day everyone who asks gets approved by a
+// robot — and it would look like nothing was wrong.
+//
+//   node scripts/test-access.mjs
+
+import assert from 'node:assert/strict'
+import { handleAccess } from '../worker/access.js'
+import { sign } from '../worker/lib/token.js'
+
+const env = {
+  SUPABASE_URL: 'https://proj.supabase.co',
+  SUPABASE_SERVICE_ROLE_KEY: 'service-role',
+  APPROVE_SECRET: 'sec',
+  ADMIN_EMAIL: 'admin@example.com',
+  RESEND_API_KEY: 're_x',
+  MAIL_FROM: 'Hisaab <no@reply.example>',
+  SITE_URL: 'https://hisaab.example',
+}
+
+const ROW = {
+  id: 'row-1',
+  email: 'asker@example.com',
+  status: 'pending',
+  created_at: '2026-08-13T10:00:00.000Z',
+  notified_at: null,
+}
+
+let calls = []
+
+globalThis.fetch = async (url, init = {}) => {
+  const method = init.method ?? 'GET'
+  const path = String(url).replace(env.SUPABASE_URL, '')
+  calls.push(`${method} ${path}`)
+  const j = (v) =>
+    new Response(JSON.stringify(v), { status: 200, headers: { 'content-type': 'application/json' } })
+
+  if (path.includes('api.resend.com')) return j({ id: 'mail-1' })
+  if (path.includes('/auth/v1/admin/users')) return j({ id: 'user-1' })
+  if (path.includes('/auth/v1/admin/generate_link'))
+    return j({ properties: { action_link: 'https://proj.supabase.co/auth/v1/verify?token=zzz' } })
+  if (path.includes('/rest/v1/access_requests')) {
+    if (method === 'POST') return j([ROW]) // the upsert, returning the row
+    if (method === 'PATCH') return j([])
+    if (path.includes('notified_at=gte.')) return j([]) // hourly cap has room
+    return j([ROW])
+  }
+  throw new Error('unexpected fetch: ' + url)
+}
+
+const run = (request) => handleAccess(request, env, new URL(request.url))
+const mutating = () => calls.filter((c) => /^(POST|PATCH|PUT|DELETE)/.test(c))
+const asked = (fragment) => calls.some((c) => c.includes(fragment))
+
+let passed = 0
+async function check(label, fn) {
+  calls = []
+  await fn()
+  passed++
+  console.log('  ok  ', label)
+}
+
+const decideForm = (t, d) => {
+  const f = new FormData()
+  f.set('t', t)
+  f.set('d', d)
+  return new Request('https://hisaab.example/api/access-decide', { method: 'POST', body: f })
+}
+
+const ask = (email) =>
+  new Request('https://hisaab.example/api/access-request', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ email }),
+  })
+
+await check('an ask records the row and mails the admin', async () => {
+  // Mixed case and a trailing space, as typed on a phone.
+  const r = await run(ask('Asker@Example.com '))
+  assert.equal(r.status, 200)
+  assert.deepEqual(await r.json(), { ok: true })
+  assert.ok(asked('api.resend.com'), 'admin should have been mailed')
+  assert.ok(asked('PATCH'), 'notified_at should have been stamped')
+})
+
+await check('a malformed address is refused without touching anything', async () => {
+  const r = await run(ask('not-an-email'))
+  assert.equal(r.status, 400)
+  assert.deepEqual(calls, [])
+})
+
+await check('a missing mail secret loses the notification, not the request', async () => {
+  const deaf = { ...env, ADMIN_EMAIL: '' }
+  const r = await handleAccess(
+    ask('asker@example.com'),
+    deaf,
+    new URL('https://hisaab.example/api/access-request'),
+  )
+  assert.equal(r.status, 200)
+  assert.ok(asked('POST /rest/v1/access_requests'), 'the row must still be written')
+  assert.ok(!asked('api.resend.com'), 'nothing to send it with')
+})
+
+const approveToken = await sign({ id: 'row-1', d: 'approve' }, env.APPROVE_SECRET, 3600)
+
+await check('opening the Approve link renders the page and mutates NOTHING', async () => {
+  const r = await run(
+    new Request(`https://hisaab.example/api/access-decide?t=${encodeURIComponent(approveToken)}`),
+  )
+  const page = await r.text()
+  assert.equal(r.status, 200)
+  assert.ok(page.includes('asker@example.com'), 'the page should name the address')
+  assert.ok(page.includes('Approve this person?'))
+  assert.deepEqual(mutating(), [], `a GET mutated something: ${mutating()}`)
+  // The URL holds a live token, so this page must never be stored.
+  assert.match(r.headers.get('cache-control') ?? '', /no-store/)
+  assert.equal(r.headers.get('x-frame-options'), 'DENY')
+})
+
+await check('a tampered link is a dead end that mutates nothing', async () => {
+  const r = await run(new Request('https://hisaab.example/api/access-decide?t=garbage.garbage'))
+  assert.ok((await r.text()).includes('Nothing to do here'))
+  assert.deepEqual(mutating(), [])
+})
+
+await check('the button creates the account, mints a link and mails them', async () => {
+  const page = await (await run(decideForm(approveToken, 'approve'))).text()
+  assert.ok(page.includes('Approved.'), page.slice(0, 300))
+  assert.ok(asked('/auth/v1/admin/users'), 'the account should have been created')
+  assert.ok(asked('generate_link'), 'a magic link should have been minted')
+  assert.ok(asked('api.resend.com'), 'they should have been mailed')
+  assert.ok(asked('PATCH'), 'the row should have been marked')
+})
+
+await check('a spent token cannot be replayed', async () => {
+  ROW.status = 'approved' // as the PATCH above would have left it
+  const page = await (await run(decideForm(approveToken, 'approve'))).text()
+  assert.ok(page.includes('already approved'))
+  assert.deepEqual(mutating(), [], 'a replayed token re-ran something')
+  ROW.status = 'pending'
+})
+
+await check('reject declines, mails, and creates no account', async () => {
+  const t = await sign({ id: 'row-1', d: 'reject' }, env.APPROVE_SECRET, 3600)
+  const page = await (await run(decideForm(t, 'reject'))).text()
+  assert.ok(page.includes('Rejected.'))
+  assert.ok(!asked('/auth/v1/admin/users'), 'reject must not create an account')
+  assert.ok(asked('api.resend.com'), 'the decline mail should have gone')
+})
+
+console.log(`\n${passed} checks passed`)
