@@ -112,24 +112,30 @@ flow — you cannot have both.
 
 1. They ask. `POST /api/access-request` writes the row and emails **you** at
    `ADMIN_EMAIL` — the address, when they asked, and two buttons.
-2. Tap **Approve** or **Reject**. The link opens a page on your own domain that
-   shows the address again with both buttons on it. **Opening the link decides
-   nothing** — see below.
-3. Press the button on that page. Approve creates the account and emails them a
-   magic link (plus the code route underneath it, because on Android a link may
-   open in the wrong browser). Reject emails a short decline.
-4. Nothing to clean up. The row keeps its verdict, which is what stops the same
+2. Tap **Approve** or **Reject**. That is the whole interaction — one tap, from
+   the mail. The page it opens carries the decision out and tells you what
+   happened. Approve creates the account and emails them a magic link (plus the
+   code route underneath it, because on Android a link may open in the wrong
+   browser). Reject emails a short decline.
+3. Nothing to clean up. The row keeps its verdict, which is what stops the same
    address mailing you twice and what lets a rejected person ask again later.
 
 Ignoring the mail is still a valid answer: the request stays `pending` forever
 and the links expire after 7 days.
 
-**Why opening the link is safe.** Mail clients, antivirus proxies and corporate
-link scanners fetch URLs out of inboxes without anyone tapping them. If the link
-itself approved, the first such fetch would approve whoever had just asked, and
-nothing would look wrong. So the `GET` only renders; the decision is a form
-`POST` from a button on that page. `scripts/test-access.mjs` asserts exactly
-this — that a `GET` on the decide route mutates nothing at all.
+**One tap, without the link itself being the trigger.** Mail clients, antivirus
+proxies and corporate link scanners fetch URLs out of inboxes with nobody
+watching. If the `GET` decided, the first such fetch would approve whoever had
+just asked and nothing would look wrong. So the `GET` still changes nothing —
+it returns a page that submits itself, and those fetchers pull HTML without
+running it. `scripts/test-access.mjs` asserts that a `GET` on the decide route
+mutates nothing at all, and that the self-submitting form is present.
+
+The residual case is a scanner that executes JavaScript — Microsoft Safe Links
+does. The admin inbox here is personal Gmail, which does not crawl links in
+mail. If `ADMIN_EMAIL` ever moves to a Microsoft 365 or Proofpoint-filtered
+mailbox, restore the confirm button: it is the `<noscript>` block already in
+`worker/access.js`, so it is a one-line change.
 
 **Why the link can't be forged.** It carries
 `base64url(payload).base64url(HMAC-SHA256(payload, APPROVE_SECRET))`, with the

@@ -107,18 +107,47 @@ await check('a missing mail secret loses the notification, not the request', asy
 
 const approveToken = await sign({ id: 'row-1', d: 'approve' }, env.APPROVE_SECRET, 3600)
 
-await check('opening the Approve link renders the page and mutates NOTHING', async () => {
+await check('opening the Approve link mutates NOTHING by itself', async () => {
   const r = await run(
     new Request(`https://hisaab.example/api/access-decide?t=${encodeURIComponent(approveToken)}`),
   )
   const page = await r.text()
   assert.equal(r.status, 200)
   assert.ok(page.includes('asker@example.com'), 'the page should name the address')
-  assert.ok(page.includes('Approve this person?'))
+
+  // THE assertion. A link scanner or mail client fetching this URL unattended
+  // pulls the HTML and does not run it, so nothing may have happened yet. The
+  // day someone "simplifies" this by deciding in the GET, everyone who applies
+  // gets approved by a robot and nothing looks broken.
   assert.deepEqual(mutating(), [], `a GET mutated something: ${mutating()}`)
+
+  // …and the decision is carried by a script the page runs on load, so the
+  // admin taps once in the mail and presses nothing here.
+  assert.match(page, /<form id="go" method="post"/, 'the self-submitting form')
+  assert.match(page, /name="d" value="approve"/, 'carrying the decision')
+  assert.match(page, /getElementById\('go'\)\.submit\(\)/, 'submitted on load')
+
+  // The script is nonce-allowed, not 'unsafe-inline' — it is the thing that
+  // decides, so it is named exactly rather than the page trusting any script.
+  const nonce = /<script nonce="([a-f0-9]+)">/.exec(page)?.[1]
+  assert.ok(nonce, 'the inline script must carry a nonce')
+  assert.ok(
+    (r.headers.get('content-security-policy') ?? '').includes(`'nonce-${nonce}'`),
+    'and the CSP must be the one that allows it',
+  )
+
   // The URL holds a live token, so this page must never be stored.
   assert.match(r.headers.get('cache-control') ?? '', /no-store/)
   assert.equal(r.headers.get('x-frame-options'), 'DENY')
+})
+
+await check('with scripting off there is still a button to press', async () => {
+  const r = await run(
+    new Request(`https://hisaab.example/api/access-decide?t=${encodeURIComponent(approveToken)}`),
+  )
+  const page = await r.text()
+  assert.match(page, /<noscript>[\s\S]*<button[\s\S]*<\/noscript>/, 'a no-JS fallback')
+  assert.deepEqual(mutating(), [])
 })
 
 await check('a tampered link is a dead end that mutates nothing', async () => {

@@ -123,13 +123,16 @@ const page = ({ site, title, heading, lead, form }) => `<!doctype html>
  * a mail client's offline copy is an approval waiting to be replayed. The rest
  * match public/_headers so the admin page is not the soft spot in the set.
  */
-const html = (body, status = 200) =>
+const html = (body, status = 200, nonce = null) =>
   new Response(body, {
     status,
     headers: {
       'content-type': 'text/html; charset=utf-8',
       'cache-control': 'no-store, max-age=0',
-      'content-security-policy': "default-src 'self'; style-src 'unsafe-inline'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+      // A nonce rather than 'unsafe-inline': the one script on this page is the
+      // auto-submit below, and it is the thing that decides, so it is worth
+      // naming exactly rather than opening the page to any inline script.
+      'content-security-policy': `default-src 'self'; script-src ${nonce ? `'nonce-${nonce}'` : "'none'"}; style-src 'unsafe-inline'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`,
       'x-frame-options': 'DENY',
       'x-content-type-options': 'nosniff',
       'referrer-policy': 'no-referrer',
@@ -311,35 +314,56 @@ async function decide(request, env, url, site) {
     return dead(site, 'This deploy is missing its secrets. Nothing was changed.')
   }
 
-  // ── The link itself. Renders, decides nothing. ──
+  // ── The link itself. Renders and submits; still decides nothing on its own. ──
+  //
+  // One tap in the mail, as asked for: no button to press on this page. The
+  // decision is carried out by a POST that the page issues on load.
+  //
+  // The GET is still inert, and that is the whole point of doing it this way
+  // rather than simply acting on the GET. Mail clients, antivirus proxies and
+  // corporate link scanners fetch URLs out of inboxes with nobody watching; a
+  // GET that decided would approve whoever had just applied, silently and with
+  // nothing looking wrong. Those fetchers pull HTML — they do not run it. So
+  // the mutation lives behind a script, and the plain fetch changes nothing.
+  //
+  // ponytail: a scanner that executes JavaScript (Microsoft Safe Links does)
+  // would get through this. The admin inbox is personal Gmail, which does not
+  // crawl links in mail, so the exposure is theoretical here. Put the confirm
+  // button back — it is the `<noscript>` block below, already written — if the
+  // admin address ever moves to a Microsoft 365 or Proofpoint-filtered mailbox.
   if (request.method === 'GET') {
     const token = url.searchParams.get('t') ?? ''
     const { row, decision, gone } = await pending(env, token)
     if (gone) return dead(site, goneLine[gone])
 
     const approving = decision === 'approve'
+    const nonce = crypto.randomUUID().replace(/-/g, '')
     return html(
       page({
         site,
-        title: 'Hisaab — decide',
-        heading: approving ? 'Approve this person?' : 'Reject this person?',
+        title: 'Hisaab',
+        heading: approving ? 'Approving…' : 'Rejecting…',
         lead: `<p class="addr">${escapeHtml(row.email)}</p>
-               <p class="muted">Asked ${escapeHtml(new Date(row.created_at).toUTCString())}</p>
-               <hr />
                <p class="muted">${
                  approving
-                   ? 'Approving creates their account and emails them a sign-in link.'
-                   : 'Rejecting emails them a short decline. They can ask again later.'
+                   ? 'Creating their account and sending them a sign-in link.'
+                   : 'Sending them a short decline. They can ask again later.'
                }</p>`,
-        // Both buttons on both pages: the decision comes from what is pressed
-        // here, not from which link was tapped, so a misfire in the inbox is
-        // recoverable without going back for the other mail.
-        form: `<form method="post" action="/api/access-decide">
+        // Hidden inputs only, so with scripting on there is nothing to look at
+        // and nothing to press. The noscript button is the whole fallback.
+        form: `<form id="go" method="post" action="/api/access-decide">
                  <input type="hidden" name="t" value="${escapeHtml(token)}" />
-                 <button class="go" name="d" value="approve" type="submit">Approve</button>
-                 <button class="no" name="d" value="reject" type="submit">Reject</button>
-               </form>`,
+                 <input type="hidden" name="d" value="${escapeHtml(decision)}" />
+                 <noscript>
+                   <button class="${approving ? 'go' : 'no'}" type="submit">
+                     ${approving ? 'Approve' : 'Reject'} ${escapeHtml(row.email)}
+                   </button>
+                 </noscript>
+               </form>
+               <script nonce="${nonce}">document.getElementById('go').submit()</script>`,
       }),
+      200,
+      nonce,
     )
   }
 

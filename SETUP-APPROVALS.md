@@ -185,12 +185,10 @@ Supabase treats them as different accounts, which is exactly what you want).
    usually hear back within 24–72 hours."*
 3. Within a few seconds, whatever you set as `ADMIN_EMAIL` gets
    *"Hisaab: … wants in"*.
-4. Tap **Approve**. A page opens showing the address. **Nothing has happened
-   yet** — that is deliberate.
-5. Press **Approve** on that page. It says "Approved."
-6. The test address gets *"You're in"* with an **Open Hisaab** button.
-7. Tap it. You should land signed in.
-8. Clean up: Supabase → Authentication → Users → delete the test user.
+4. Tap **Approve**. One tap — the page says *Approving…*, then *Approved.*
+5. The test address gets *"You're in"* with an **Open Hisaab** button.
+6. Tap it. You should land signed in.
+7. Clean up: Supabase → Authentication → Users → delete the test user.
 
 **Then test Reject** with a second `+test2` address, so you have seen the decline
 mail before a real person does.

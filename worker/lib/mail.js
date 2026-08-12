@@ -91,8 +91,9 @@ const fine = (html) =>
 
 /**
  * To the admin. The two links are the whole feature: each is a one-shot signed
- * token, and neither does anything until a button on the page it opens is
- * pressed — see worker/access.js for why a bare GET must not decide anything.
+ * token, and tapping one carries the decision out without a second press. The
+ * GET it lands on is still inert — the page submits itself — for the reasons
+ * set out at the top of the GET handler in worker/access.js.
  */
 export const adminRequest = ({ site, email, asked, approveUrl, rejectUrl }) =>
   shell({
@@ -106,7 +107,7 @@ export const adminRequest = ({ site, email, asked, approveUrl, rejectUrl }) =>
       <div style="margin-top:22px;">${button(approveUrl, 'Approve')}</div>
       <div style="margin-top:10px;">${button(rejectUrl, 'Reject', { fill: '#f1f1ed', ink: '#0e0f0c' })}</div>
       ${fine(
-        `Each link opens a page that shows you the address again before anything happens &mdash; nothing is decided by opening it. They stop working in 7 days, or the moment you decide, whichever is first.`,
+        `One tap does it. Approve creates their account and emails them a sign-in link; Reject sends a short decline and they may ask again later. Either link stops working after 7 days, or the moment you use one &mdash; whichever comes first.`,
       )}`,
   })
 
