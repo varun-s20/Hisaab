@@ -8,7 +8,7 @@ import {
   isPersonal, detectApp, synthRef, parseScreenshot,
 } from '../src/lib/parse.js'
 import { seedLookup } from '../src/lib/seeds.js'
-import { sanitise, guess } from '../src/lib/query.js'
+import { sanitise, guess, uncategorisedNote } from '../src/lib/query.js'
 
 const NOW = new Date(2026, 7, 11) // 11 Aug 2026
 let n = 0
@@ -447,6 +447,34 @@ check('a reminder fires once per period, and only when it is useful', () => {
 
   // Off is off.
   assert.deepEqual(due({ ...DEFAULTS, daily: false, monthly: false, weekly: false }, {}, evening), [])
+})
+
+// ── A category answer over an unfiled ledger ───────────────────────────────
+
+check('a category question names the payments it could not see', () => {
+  const rows = [
+    { txn_date: '2026-08-01', type: 'expense', category: 'Other', amount: 400, payee_raw: 'A' },
+    { txn_date: '2026-08-02', type: 'expense', category: null, amount: 250, payee_raw: 'B' },
+    { txn_date: '2026-08-03', type: 'expense', category: 'Food & Dining', amount: 300, payee_raw: 'C' },
+    // Excluded by the spec's own type filter, so not part of this answer.
+    { txn_date: '2026-08-04', type: 'transfer', category: 'Other', amount: 900, payee_raw: 'D' },
+  ]
+  const food = sanitise({ categories: ['Food & Dining'], types: ['expense'] })
+  assert.match(uncategorisedNote(food, rows), /^2 payments here have no category/)
+
+  // No category filter means nothing was hidden by one — say nothing.
+  assert.equal(uncategorisedNote(sanitise({ types: ['expense'] }), rows), null)
+
+  // Nothing unfiled, nothing to say.
+  assert.equal(uncategorisedNote(food, [rows[2]]), null)
+
+  // The period of the real question still applies: only the 3rd is in range,
+  // and it is already categorised.
+  const lastDay = sanitise({ categories: ['Food & Dining'], types: ['expense'], from: '2026-08-03', to: '2026-08-03' })
+  assert.equal(uncategorisedNote(lastDay, rows), null)
+
+  // Singular reads as English.
+  assert.match(uncategorisedNote(food, [rows[0], rows[2]]), /^1 payment here has no category/)
 })
 
 // ── Statements: a sign is a direction ──────────────────────────────────────

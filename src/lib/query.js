@@ -268,6 +268,33 @@ export function group(rows, by) {
   return by === 'day' ? out.sort((a, b) => (a.key < b.key ? 1 : -1)) : out.sort((a, b) => b.total - a.total)
 }
 
+/**
+ * The payments a category question could not see, because they have no category.
+ *
+ * The cascade files everything it cannot resolve as 'Other' (lib/categorise.js),
+ * and its AI tier returned nothing at all until the Cloudflare worker existed to
+ * run /api/categorise — so a ledger built before that is largely 'Other'. Ask
+ * then answers "how much did I spend on food" with ₹0 over "Nothing matched",
+ * which is true about the filter and false about the money: the payments are
+ * there, they are simply unfiled. The small non-zero is worse than the ₹0 — a
+ * confident figure that quietly leaves most of the answer out, with nothing on
+ * screen saying so.
+ *
+ * Counted through applySpec with only the category filter lifted, so the period,
+ * merchant, method and amount constraints of the real question still apply.
+ */
+export function uncategorisedNote(spec, rows) {
+  if (!spec.categories.length) return null
+  const n = applySpec(rows, { ...spec, categories: [] }).filter(
+    (r) => !r.category || r.category === 'Other',
+  ).length
+  if (n === 0) return null
+  const one = n === 1
+  return `${n} payment${one ? '' : 's'} here ${one ? 'has' : 'have'} no category yet, so ${
+    one ? "it isn't" : "they aren't"
+  } in this figure. Teach me files them.`
+}
+
 /** What the question is worth reading back: the filter, in words. */
 export function describe(spec, methods) {
   const bits = []

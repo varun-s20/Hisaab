@@ -1685,11 +1685,19 @@ input[type='time'] { padding-top: 13px; padding-bottom: 13px; }
   bottom: calc(96px + env(safe-area-inset-bottom));
   background: var(--forest-green);
   color: #e8ebe6;
-  border-radius: var(--radius-pill);
-  padding: 12px 20px;
+  /* Not a pill, and not 90vw. "Learned 1. 1 past payment recategorised." runs
+     about 290px at this size; 90vw less 40px of padding leaves 284px on a 360px
+     phone, so it wrapped — and a 999px radius across two lines reads as a
+     stadium with the words crushed into the middle of it. 20px is still round
+     enough to look like a pill on the single line it now usually is, and still
+     looks deliberate on the two lines a long error message needs. */
+  border-radius: 20px;
+  padding: 12px 18px;
   font-size: 14px;
   font-weight: 500;
-  max-width: 90vw;
+  line-height: 1.4;
+  text-align: center;
+  max-width: min(520px, calc(100vw - 24px));
   z-index: 30;
   box-shadow: var(--shadow-lift);
   opacity: 1;

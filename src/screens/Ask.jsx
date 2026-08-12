@@ -3,7 +3,7 @@ import { listTransactions, listMethods } from '../lib/db'
 import { money, dayLabel, spendTotal, earnTotal, investTotal } from '../lib/format'
 import { postJson } from '../lib/api'
 import { allCategories, colorFor } from '../lib/categories'
-import { sanitise, guess, applySpec, group, describe } from '../lib/query'
+import { sanitise, guess, applySpec, group, describe, uncategorisedNote } from '../lib/query'
 import ScreenHeader from '../components/ScreenHeader.jsx'
 import Amount from '../components/Amount.jsx'
 import { Bar, HeroSkeleton, RowsSkeleton } from '../components/Skeleton.jsx'
@@ -80,7 +80,14 @@ export default function Ask({ onBack }) {
         // Only the validated date window reaches the database. Everything else
         // is applied in memory, so a malformed spec can never become a query.
         const rows = await listTransactions({ from: spec.from, to: spec.to, limit: 5000 })
-        setResult({ spec, rows: applySpec(rows, spec), local })
+        // Computed here, against the rows before the category filter took them
+        // away — that count no longer exists once applySpec has run.
+        setResult({
+          spec,
+          rows: applySpec(rows, spec),
+          local,
+          note: uncategorisedNote(spec, rows),
+        })
       } catch (e) {
         setErr(e.message ?? String(e))
       } finally {
@@ -99,7 +106,7 @@ export default function Ask({ onBack }) {
     const { spec, local } = result
     try {
       const rows = await listTransactions({ from: spec.from, to: spec.to, limit: 5000 })
-      setResult({ spec, rows: applySpec(rows, spec), local })
+      setResult({ spec, rows: applySpec(rows, spec), local, note: uncategorisedNote(spec, rows) })
     } catch (e) {
       setErr(e.message ?? String(e))
     }
@@ -241,9 +248,18 @@ export default function Ask({ onBack }) {
             </p>
           )}
 
+          {/* A category question over an unfiled ledger. Said on every such
+              answer, not only the empty one: a small confident figure that
+              silently omits most of the payments is the worse of the two. */}
+          {result.note && result.rows.length > 0 && (
+            <p className="muted" style={{ fontSize: 12.5, margin: 0 }}>{result.note}</p>
+          )}
+
           {result.rows.length === 0 && (
             <div className="card">
-              <p className="empty">Nothing matched. Try naming a category or a period.</p>
+              <p className="empty">
+                {result.note ?? 'Nothing matched. Try naming a category or a period.'}
+              </p>
             </div>
           )}
 
