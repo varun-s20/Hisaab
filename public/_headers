@@ -1,0 +1,18 @@
+# Read by Cloudflare Workers static assets. Only the four files that decide
+# *which version of the app you get* are listed — everything with real weight
+# (/assets/* and /tesseract/*) has a hashed or immutable name and keeps its
+# long cache.
+#
+# no-cache does not mean "do not store": the browser keeps its copy and
+# revalidates, so an unchanged deploy costs a 304 with an empty body. This
+# exists so a CDN can never pin a stale sw.js — the one failure that makes an
+# installed PWA permanently unupdatable and sends people looking for the
+# clear-cache button.
+/sw.js
+  Cache-Control: no-cache
+/registerSW.js
+  Cache-Control: no-cache
+/index.html
+  Cache-Control: no-cache
+/manifest.webmanifest
+  Cache-Control: no-cache

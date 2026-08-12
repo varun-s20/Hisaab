@@ -88,8 +88,11 @@ async function fire() {
   for (const r of out) {
     await self.registration.showNotification(r.title, {
       body: r.body,
-      icon: '/icon-192.png',
-      badge: '/icon-192.png',
+      // No `icon`. On an installed PWA Android already draws the app's own
+      // launcher icon on the left, exactly like every other app in the shade —
+      // `icon` is a *second* copy, pinned to the right of the card. Dropping it
+      // leaves the one on the left. See src/lib/notify.js, which must match.
+      badge: '/badge-96.png',
       tag: `hisaab-${r.id}`,
       data: { tab: r.tab },
     })

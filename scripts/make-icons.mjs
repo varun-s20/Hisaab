@@ -215,27 +215,28 @@ function chunk(type, data) {
  * heuristic, and here it is the difference between 215KB and something a phone
  * downloads without noticing.
  */
-function encode(size, pixels) {
-  const bpp = 3
+function encode(size, pixels, keepAlpha = false) {
+  const bpp = keepAlpha ? 4 : 3
   const stride = size * bpp
 
   const ihdr = Buffer.alloc(13)
   ihdr.writeUInt32BE(size, 0)
   ihdr.writeUInt32BE(size, 4)
   ihdr[8] = 8 // bit depth
-  ihdr[9] = 2 // RGB
+  ihdr[9] = keepAlpha ? 6 : 2 // RGBA / RGB
 
   const raw = Buffer.alloc(size * (stride + 1))
   let prev = Buffer.alloc(stride)
 
   for (let y = 0; y < size; y++) {
-    // Drop alpha as we go.
+    // Drop alpha as we go, unless the whole point of the file is its alpha.
     const line = Buffer.alloc(stride)
     for (let x = 0; x < size; x++) {
       const s = (y * size + x) * 4
       line[x * bpp] = pixels[s]
       line[x * bpp + 1] = pixels[s + 1]
       line[x * bpp + 2] = pixels[s + 2]
+      if (keepAlpha) line[x * bpp + 3] = pixels[s + 3]
     }
 
     let best = null
@@ -281,6 +282,105 @@ function filter(type, line, prev, bpp) {
     out[i] = v & 0xff
   }
   return out
+}
+
+// ── Notification badge ──────────────────────────────────────────────────────
+const luma = (px, o) => 0.2126 * px[o] + 0.7152 * px[o + 1] + 0.0722 * px[o + 2]
+
+/**
+ * The rows and columns holding the topmost piece of art — the receipt mark,
+ * found rather than hardcoded so a redrawn logo can't silently ship a mis-crop.
+ * Scanning stops at the first blank row under the mark, which is what leaves the
+ * wordmark and byline behind.
+ */
+function markBox(img, field) {
+  const cut = luma(field, 0) * 0.6 // meaningfully darker than the field
+  const inked = (x, y) => luma(img.px, (y * img.width + x) * 4) < cut
+
+  const rowInked = (y) => {
+    for (let x = 0; x < img.width; x++) if (inked(x, y)) return true
+    return false
+  }
+
+  let top = 0
+  while (top < img.height && !rowInked(top)) top++
+  if (top === img.height) throw new Error('no artwork found in the logo')
+  let bottom = top
+  while (bottom + 1 < img.height && rowInked(bottom + 1)) bottom++
+
+  let left = img.width
+  let right = 0
+  for (let y = top; y <= bottom; y++) {
+    for (let x = 0; x < img.width; x++) {
+      if (!inked(x, y)) continue
+      if (x < left) left = x
+      if (x > right) right = x
+    }
+  }
+  return { left, top, width: right - left + 1, height: bottom - top + 1 }
+}
+
+/**
+ * The Android status-bar badge.
+ *
+ * Android reads the ALPHA CHANNEL ONLY here and paints every opaque pixel flat
+ * white — colour is discarded. Handing it icon-192.png, which is opaque edge to
+ * edge, is therefore a request for a solid white square, and that is exactly
+ * what it drew. So this writes a silhouette: alpha tracks how dark the pixel is
+ * against the field, RGB is white and never read.
+ *
+ * Only the receipt mark goes in. At the ~24dp Android actually draws this at,
+ * "हिसाब" and "BY BROOMBUILDS" are two illegible smears; the mark alone reads.
+ */
+function badge(img, field, size, scale) {
+  const box = markBox(img, field)
+
+  // Cropped before resampling, so this is the mark at full resolution rather
+  // than the entire lockup shrunk until only the mark's share of it survives.
+  const crop = Buffer.alloc(box.width * box.height * 4)
+  for (let y = 0; y < box.height; y++) {
+    for (let x = 0; x < box.width; x++) {
+      const s = ((y + box.top) * img.width + (x + box.left)) * 4
+      const d = (y * box.width + x) * 4
+      crop[d] = img.px[s]
+      crop[d + 1] = img.px[s + 1]
+      crop[d + 2] = img.px[s + 2]
+      crop[d + 3] = 255
+    }
+  }
+
+  const long = Math.max(box.width, box.height)
+  const inner = Math.round(size * scale)
+  const w = Math.max(1, Math.round((box.width / long) * inner))
+  const h = Math.max(1, Math.round((box.height / long) * inner))
+  const scaled = resample(crop, box.width, box.height, w, h)
+
+  const fieldLuma = luma(field, 0)
+  // Measured, not assumed. The ink is a very dark green, not black — dividing
+  // by fieldLuma alone tops the mark out around alpha 191 and Android draws a
+  // grey badge. Stretching to the darkest pixel actually present makes the
+  // stroke fully opaque while leaving the anti-aliased edges soft.
+  let inkLuma = fieldLuma
+  for (let i = 0; i < w * h; i++) inkLuma = Math.min(inkLuma, luma(scaled, i * 4))
+  const span = Math.max(1, fieldLuma - inkLuma)
+
+  const out = Buffer.alloc(size * size * 4) // transparent
+  const ox = Math.round((size - w) / 2)
+  const oy = Math.round((size - h) / 2)
+
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const s = (y * w + x) * 4
+      const d = ((y + oy) * size + (x + ox)) * 4
+      out[d] = 255
+      out[d + 1] = 255
+      out[d + 2] = 255
+      // Field → 0, ink → 255, anti-aliased edges in between.
+      const a = ((fieldLuma - luma(scaled, s)) / span) * 255
+      out[d + 3] = Math.max(0, Math.min(255, Math.round(a)))
+    }
+  }
+  return { px: out, box }
 }
 
 // ── Build ───────────────────────────────────────────────────────────────────
@@ -339,3 +439,13 @@ for (const [name, size, scale] of ICONS) {
   writeFileSync(name, encode(size, compose(logo, size, scale, bg)))
   console.log(`wrote ${name} (${size}×${size}${scale < 1 ? `, logo at ${scale * 100}%` : ''})`)
 }
+
+// 96×96 is what Android asks for at xxhdpi; it draws it at 24dp. The mark sits
+// at 80% because the system adds no padding of its own to this one.
+const BADGE = 96
+const { px, box } = badge(logo, bg, BADGE, 0.8)
+writeFileSync('public/badge-96.png', encode(BADGE, px, true))
+console.log(
+  `wrote public/badge-96.png (${BADGE}×${BADGE}, white silhouette of the mark ` +
+    `found at ${box.width}×${box.height} from ${box.left},${box.top})`,
+)

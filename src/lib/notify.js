@@ -224,8 +224,16 @@ export async function check(facts = {}) {
   for (const r of list) {
     await reg.showNotification(r.title, {
       body: r.body,
-      icon: '/icon-192.png',
-      badge: '/icon-192.png',
+      // No `icon` — Android already draws the installed app's launcher icon on
+      // the left, and `icon` only adds a duplicate on the right of the card.
+      //
+      // `badge` is the small status-bar mark, and Android reads its ALPHA
+      // CHANNEL ONLY, painting every opaque pixel flat white. icon-192.png is
+      // opaque edge to edge, so it drew a solid white square. badge-96.png is a
+      // transparent silhouette built for this by scripts/make-icons.mjs.
+      // public/reminders.js fires the same reminders with the app closed and
+      // must stay in step with this.
+      badge: '/badge-96.png',
       // One per kind: a second daily nudge replaces the first rather than
       // stacking a column of identical cards in the shade.
       tag: `hisaab-${r.id}`,
