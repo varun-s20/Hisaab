@@ -105,6 +105,45 @@ create table if not exists budgets (
   unique (user_id, scope, category)
 );
 
+-- ── Repeats: bills that come round, and what you log every day ────────────
+--
+-- A saved payment, optionally with a schedule attached.
+--
+--   rule is null   a tile on Today. Tap it to log the payment. Chai ₹20.
+--   rule is set    a bill. It tells you it is due; it never posts by itself.
+--
+-- The rule is jsonb — { "every": 1, "unit": "month", "monthDay": 5 } and
+-- friends. The app validates it on the way out as well as in, because the
+-- database cannot.
+create table if not exists templates (
+  id             uuid primary key default gen_random_uuid(),
+  user_id        uuid references auth.users(id) default auth.uid(),
+
+  label          text not null check (length(label) between 1 and 40),
+
+  payee          text not null check (length(payee) between 1 and 120),
+  amount         numeric(12,2) check (amount is null or amount > 0),
+  category       text,
+  type           text not null default 'expense'
+                 check (type in ('expense','income','investment','transfer','refund','lent','repaid')),
+  direction      text not null default 'debit' check (direction in ('debit','credit')),
+  method         text,
+  account        text,
+  to_account     text,
+  note           text check (note is null or length(note) <= 140),
+
+  rule           jsonb,
+  starts_on      date,
+  last_posted_on date,
+
+  pinned         boolean not null default false,
+  hidden         boolean not null default false,
+  source         text not null default 'user' check (source in ('user','detected')),
+  created_at     timestamptz default now()
+);
+
+create index if not exists templates_user_idx on templates (user_id);
+
 -- ── Row level security ─────────────────────────────────────────────────────
 --
 -- This is not optional and it is not ceremony. The key Hisaab holds for this
@@ -116,6 +155,7 @@ alter table transactions enable row level security;
 alter table merchant_map enable row level security;
 alter table budgets      enable row level security;
 alter table categories   enable row level security;
+alter table templates    enable row level security;
 
 drop policy if exists "own rows" on transactions;
 create policy "own rows" on transactions
@@ -133,11 +173,15 @@ drop policy if exists "own budgets" on budgets;
 create policy "own budgets" on budgets
   for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
 
+drop policy if exists "own templates" on templates;
+create policy "own templates" on templates
+  for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
 -- ── Check ──────────────────────────────────────────────────────────────────
--- Four rows, all with rowsecurity = true. Anything else and Hisaab will refuse
+-- Five rows, all with rowsecurity = true. Anything else and Hisaab will refuse
 -- to connect, which is the correct behaviour rather than an error to work
 -- around.
 select tablename, rowsecurity
   from pg_tables
  where schemaname = 'public'
-   and tablename in ('transactions', 'merchant_map', 'budgets', 'categories');
+   and tablename in ('transactions', 'merchant_map', 'budgets', 'categories', 'templates');

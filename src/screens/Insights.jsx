@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { LineChart, Line, XAxis, PieChart, Pie, Cell, ResponsiveContainer } from 'recharts'
-import { listTransactions } from '../lib/db'
+import { listTransactions, listTemplates, saveTemplate } from '../lib/db'
 import { money, iso, today, startOfMonth, daysInMonth, dayLabel, spendTotal } from '../lib/format'
 import { colorFor, allCategories } from '../lib/categories'
 import { findRecurring, committedPerMonth } from '../lib/recurring'
+import { dismissal, templateFromRecurring } from '../lib/entry'
 import CategoryIcon from '../components/CategoryIcon.jsx'
 import Amount from '../components/Amount.jsx'
 import Skeleton, { HeroSkeleton, RowsSkeleton } from '../components/Skeleton.jsx'
@@ -102,6 +103,8 @@ const CYCLE_DAYS = { weekly: 7, fortnightly: 14, monthly: 30.4, quarterly: 91, y
 // Both sides parse as UTC midnight, so the difference is exact whole days.
 const daysSince = (date) => (Date.parse(today()) - Date.parse(date)) / 86400000
 const hasLapsed = (f) => daysSince(f.next) > (CYCLE_DAYS[f.cadence] ?? 30.4)
+
+const sameName = (a, b) => String(a ?? '').trim().toLowerCase() === String(b ?? '').trim().toLowerCase()
 
 const Rs = ({ n, className = '' }) => (
   <span className={`num ${className}`.trim()}>
@@ -204,13 +207,22 @@ const AskBar = ({ onClick }) => (
   </button>
 )
 
-export default function Insights({ goAsk }) {
+export default function Insights({ goAsk, goRepeats }) {
   const [rows, setRows] = useState(null)
   const [err, setErr] = useState('')
   const [attempt, setAttempt] = useState(0)
   const [c] = useState(palette)
   const [active, setActive] = useState(null) // index into the donut slices
   const [split, setSplit] = useState('expense') // which kind of money the donut shows
+  // What has already been answered for, so a pattern is only ever offered once.
+  // Fails to [] — a missing templates table means nothing has been answered.
+  const [templates, setTemplates] = useState([])
+  const [deciding, setDeciding] = useState(null) // the pattern mid-write
+  // Its own state, deliberately not `err`. That one means "your transactions
+  // did not load" and takes the whole screen — reporting a failed bill write
+  // through it would replace a page of correct numbers with "Couldn't read your
+  // month", which is both alarming and false.
+  const [decideErr, setDecideErr] = useState('')
 
   useEffect(() => {
     let live = true
@@ -231,10 +243,34 @@ export default function Insights({ goAsk }) {
         // month" — and a dropped connection is not entitled to make it.
         if (live) setErr(e.message ?? String(e))
       })
+    listTemplates()
+      .then((t) => live && setTemplates(t))
+      .catch(() => {})
     return () => {
       live = false
     }
   }, [attempt])
+
+  /**
+   * Turn a pattern the app spotted into a bill it will remind you about, or
+   * refuse it for good.
+   *
+   * Both write a row, and that is the point of both: a decision the app forgets
+   * is a decision it asks you to make again every month. Neither posts a
+   * payment — the charges that revealed the pattern are already in the ledger.
+   */
+  async function decide(f, track) {
+    setDeciding(f.name)
+    setDecideErr('')
+    try {
+      await saveTemplate(track ? templateFromRecurring(f) : dismissal(f.name))
+      setTemplates(await listTemplates())
+    } catch (e) {
+      setDecideErr(e.message ?? String(e))
+    } finally {
+      setDeciding(null)
+    }
+  }
 
   const d = useMemo(() => {
     const now = new Date()
@@ -365,7 +401,14 @@ export default function Insights({ goAsk }) {
 
     // Over the whole six months, not just this one — three sightings is the floor.
     // Split, though: a bill that stopped charging is history, not commitment.
-    const found = findRecurring(spend)
+    //
+    // Anything already answered for is dropped: a pattern you have turned into
+    // a bill is on the Repeats screen with a real schedule, and one you said was
+    // not a bill should not come back next month to ask again.
+    const answered = templates.map((t) => t.payee)
+    const found = findRecurring(spend).filter(
+      (f) => !answered.some((name) => sameName(name, f.name)),
+    )
     const recurring = found.filter((f) => !hasLapsed(f))
     const lapsed = found.filter(hasLapsed)
 
@@ -373,7 +416,7 @@ export default function Insights({ goAsk }) {
       dim, dom, line, mtd, prevTotal, projected, monthCount, splits,
       cats: ranked.slice(0, 8), merchants, strip, busiest, unusual, recurring, lapsed,
     }
-  }, [rows])
+  }, [rows, templates])
 
   const [shownActive, swapping] = useBlurSwap(active)
 
@@ -700,10 +743,41 @@ export default function Insights({ goAsk }) {
                       <Rs n={f.amount} />
                     </div>
                   </div>
+                  {/* The app worked the pattern out; only you can say whether it
+                      is a bill. Tracking it puts it on Repeats with a real
+                      schedule and a reminder on the day. */}
+                  <div className="rowactions" style={{ padding: '0 16px 14px' }}>
+                    <button
+                      type="button"
+                      className="btn ghost small"
+                      disabled={deciding != null}
+                      onClick={() => decide(f, true)}
+                    >
+                      Track as a bill
+                    </button>
+                    <button
+                      type="button"
+                      className="btn ghost small"
+                      disabled={deciding != null}
+                      onClick={() => decide(f, false)}
+                    >
+                      Not a bill
+                    </button>
+                  </div>
                 </li>
               ))}
             </ul>
           </div>
+          {decideErr && (
+            <p className="alert" style={{ fontSize: 13, margin: '10px 2px 0' }}>{decideErr}</p>
+          )}
+          {goRepeats && (
+            <p style={{ textAlign: 'center', marginTop: 12 }}>
+              <button className="linkish" onClick={goRepeats}>
+                Everything you already track
+              </button>
+            </p>
+          )}
         </>
       )}
 

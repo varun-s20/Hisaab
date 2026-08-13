@@ -29,6 +29,7 @@ export const DEFAULTS = {
   daily: true,
   monthly: true, // the 1st, to set a budget
   weekly: true, // Sunday, if anything is waiting
+  bills: true, // any day a repeat has come due
   shown: {}, // reminder id → the ISO date it last fired
   asked: false, // whether the permission prompt has been shown once
 }
@@ -188,6 +189,24 @@ export function due(prefs, facts = {}, now = new Date()) {
       title: 'Anything to add today?',
       body: 'Drop in the day’s payment screenshots — they’re read on your phone.',
       tab: 'today',
+    })
+  }
+
+  // A repeat that has come due. Not tied to the daily hour: rent being due is
+  // worth saying at breakfast, and it is the one reminder here that is about
+  // something with a date rather than a habit.
+  //
+  // Page-only, like the Sunday nudge below — public/reminders.js has no way to
+  // read the ledger, so it cannot know. Whichever runs first wins the day
+  // through `shown`.
+  if (prefs.bills && !already('bills', day) && (facts.billsDue ?? 0) > 0) {
+    const n = facts.billsDue
+    out.push({
+      id: 'bills',
+      period: day,
+      title: `${n} repeat${n === 1 ? '' : 's'} due`,
+      body: 'Confirm the ones that happened — nothing is added to your ledger until you do.',
+      tab: 'repeats',
     })
   }
 

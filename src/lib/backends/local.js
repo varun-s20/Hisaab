@@ -18,8 +18,8 @@ const DB_NAME = 'hisaab'
 // Bumped when a store is added. `onupgradeneeded` only fires on a version
 // change, so a device that already opened v1 would never get the categories
 // store without this and every read of it would throw NotFoundError.
-const DB_VERSION = 2
-const STORES = ['transactions', 'merchant_map', 'budgets', 'categories']
+const DB_VERSION = 3
+const STORES = ['transactions', 'merchant_map', 'budgets', 'categories', 'templates']
 
 /** Promisify one IDB request. */
 const request = (req) =>
@@ -135,8 +135,10 @@ export function localBackend() {
     kind: 'local',
 
     // Nothing is behind a migration here — the store is created with every
-    // column the app knows about, so both features are always present.
-    capabilities: () => ({ toAccount: true, budgetScope: true }),
+    // column the app knows about, so every feature is always present. The
+    // version bump above is what guarantees it on a device that opened an
+    // older build.
+    capabilities: () => ({ toAccount: true, budgetScope: true, templates: true }),
 
     async ready() {
       if (typeof indexedDB === 'undefined') {
@@ -330,6 +332,36 @@ export function localBackend() {
     async deleteCategory(name) {
       await load()
       await drop('categories', rowsIn('categories').filter((c) => c.name === name).map((c) => c.id))
+    },
+
+    // ── Repeats: tiles and bills ───────────────────────────────────────────
+
+    async listTemplates() {
+      await load()
+      return rowsIn('templates').sort(
+        (a, b) => String(a.label ?? '').localeCompare(String(b.label ?? '')),
+      )
+    },
+
+    /** Keyed on the uuid, unlike the merchant map and categories — two bills to
+     *  the same payee for different amounts are two bills, and nothing about a
+     *  template is naturally unique. The caller decides what is a duplicate. */
+    async upsertTemplate(row) {
+      await load()
+      const existing = row.id ? table('templates').get(row.id) : null
+      const next = {
+        ...existing,
+        ...row,
+        id: existing?.id ?? row.id ?? crypto.randomUUID(),
+        created_at: existing?.created_at ?? row.created_at ?? nowStamp(),
+      }
+      await put('templates', [next])
+      return next
+    },
+
+    async deleteTemplate(id) {
+      await load()
+      await drop('templates', table('templates').has(id) ? [id] : [])
     },
 
     async clear() {

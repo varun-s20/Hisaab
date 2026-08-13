@@ -36,6 +36,11 @@ export function supabaseBackend(client) {
    */
   let hasToAccount = true
   let hasScope = true
+  // Same arrangement for the templates table, which arrived later still. A
+  // database that has not run db/migrate-templates.sql answers 42P01 for it,
+  // and that must cost the user the repeats feature and nothing else — not
+  // Today, not the ledger, not a save.
+  let hasTemplates = true
 
   const BASE = [
     'id', 'txn_ref', 'txn_date', 'txn_time', 'amount', 'direction', 'type',
@@ -44,6 +49,14 @@ export function supabaseBackend(client) {
   ]
 
   const COLUMNS = () => (hasToAccount ? [...BASE, 'to_account'] : BASE).join(', ')
+
+  // Named rather than '*' so a column added to the table later cannot start
+  // arriving in a backup or a migration copy without anyone deciding it should.
+  const TEMPLATE_COLUMNS = [
+    'id', 'label', 'payee', 'amount', 'category', 'type', 'direction', 'method',
+    'account', 'to_account', 'note', 'rule', 'starts_on', 'last_posted_on',
+    'pinned', 'hidden', 'source', 'created_at',
+  ].join(', ')
 
   /**
    * Run a PostgREST call that names `to_account`, once more without it if the
@@ -128,7 +141,7 @@ export function supabaseBackend(client) {
      * wrong number — an account balance without `to_account` is missing every
      * transfer in, which reads as money that vanished.
      */
-    capabilities: () => ({ toAccount: hasToAccount, budgetScope: hasScope }),
+    capabilities: () => ({ toAccount: hasToAccount, budgetScope: hasScope, templates: hasTemplates }),
 
     async ready() {
       // One cheap round trip that touches all three tables. Enough to tell a
@@ -367,6 +380,49 @@ export function supabaseBackend(client) {
       if (error && error.code !== MISSING_TABLE) throw error
     },
 
+    // ── Repeats: tiles and bills ───────────────────────────────────────────
+
+    /**
+     * Degrades to [] on a database that predates the table, exactly as
+     * listCategories does and for the same reason: everything else about the
+     * app works without it, and taking Today down because someone has not run
+     * a migration would be a far worse failure than a missing row of tiles.
+     * The capability flag is what tells the screens to say so out loud.
+     */
+    async listTemplates() {
+      if (!hasTemplates) return []
+      const { data, error } = await client.from('templates').select(TEMPLATE_COLUMNS).order('label')
+      if (error) {
+        if (error.code === MISSING_TABLE || error.code === MISSING_COLUMN) {
+          hasTemplates = false
+          console.warn('[db] no templates table — run db/migrate-templates.sql. Repeats are off until you do.')
+          return []
+        }
+        throw error
+      }
+      return data ?? []
+    },
+
+    /**
+     * Throws where the read degrades. A write that quietly does nothing is the
+     * one failure worth being loud about: the sheet would close, the bill would
+     * look saved, and it would simply never arrive.
+     */
+    async upsertTemplate(row) {
+      const { data, error } = await client.from('templates').upsert(row).select(TEMPLATE_COLUMNS).maybeSingle()
+      if (error?.code === MISSING_TABLE) {
+        hasTemplates = false
+        throw new Error('Run db/migrate-templates.sql — repeats need a table of their own.')
+      }
+      if (error) throw error
+      return data ?? null
+    },
+
+    async deleteTemplate(id) {
+      const { error } = await client.from('templates').delete().eq('id', id)
+      if (error && error.code !== MISSING_TABLE) throw error
+    },
+
     // ── Wiping, for the "move it and delete the original" half of a switch ──
 
     /**
@@ -379,7 +435,7 @@ export function supabaseBackend(client) {
      * database anyway.
      */
     async clear() {
-      for (const table of ['transactions', 'merchant_map', 'budgets', 'categories']) {
+      for (const table of ['transactions', 'merchant_map', 'budgets', 'categories', 'templates']) {
         const { error } = await client
           .from(table)
           .delete()

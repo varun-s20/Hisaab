@@ -57,8 +57,18 @@ still has both halves of a transfer in one cell.
 through. Run it on a fresh database too — `db/schema.sql` still creates the
 table the old way. Safe to run twice.
 
+**Then run `db/migrate-templates.sql`.** This adds `templates`, which holds the
+repeats: bills that come round on a schedule, and the one-tap tiles on Today.
+Same reason as the others — `create table if not exists` in `db/schema.sql` will
+not add a table to a database that already exists.
+
+Skipping it costs you that one screen and nothing else. The app reads a missing
+table as "this feature is off", says which file to run, and every other screen
+carries on exactly as before. Safe to run twice.
+
 Verify: **Table Editor** should now show `transactions`, `merchant_map`,
-`budgets` and `access_requests`, all with a green "RLS enabled" badge.
+`budgets`, `categories`, `templates` and `access_requests`, all with a green
+"RLS enabled" badge.
 `access_requests` should have **no policies at all** — that is correct now, and
 means nothing holding the anon key can read or write it.
 

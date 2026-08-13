@@ -153,6 +153,7 @@ export default function Storage({ onBack }) {
         [report.categories.copied, 'categories'],
         [report.budgets.copied, 'budgets'],
         [report.merchants.copied, 'merchants'],
+        [report.templates?.copied ?? 0, 'repeats'],
       ].filter(([n]) => n > 0)
 
       setDone(
@@ -384,7 +385,8 @@ export default function Storage({ onBack }) {
       <h2 className="section">Backup</h2>
       <div className="panel">
         <p className="muted" style={{ margin: 0, fontSize: 13, lineHeight: 1.6 }}>
-          One file with everything in it: transactions, categories, budgets and the merchant map.
+          One file with everything in it: transactions, categories, budgets, repeats and the
+          merchant map.
           Worth having wherever your data lives, and the only copy that exists if you keep it on
           this device.
         </p>

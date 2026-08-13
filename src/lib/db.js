@@ -6,6 +6,8 @@ import { createBackend } from './backends/index.js'
 import { synthRef } from './parse.js'
 import { normalise } from './seeds.js'
 import { today } from './format.js'
+import { TYPES } from './categories.js'
+import { ruleProblem } from './schedule.js'
 
 // The ledger, whichever backend it lives in.
 //
@@ -216,13 +218,24 @@ export async function updateTransaction(id, patch) {
 
 export async function deleteTransaction(id) {
   await (await db()).deleteTransactions([id])
+  forgetAccounts()
 }
 
-/** Undo an import. Deleting by the ids the insert handed back is exact — a
- *  date range would also take rows that were already there. */
+/**
+ * Undo an import. Deleting by the ids the insert handed back is exact — a date
+ * range would also take rows that were already there.
+ *
+ * The cache wipe matters most here. Both derived lists are read OFF the rows,
+ * so a delete can empty one the same way a write can fill it — and an import is
+ * how a pile of account names arrives at once. Undoing one used to leave every
+ * one of them in the pickers, and in the list of names Ask sends to the model,
+ * until the next save or reload happened to clear it.
+ */
 export async function deleteTransactions(ids) {
   if (!ids?.length) return 0
-  return (await db()).deleteTransactions(ids)
+  const n = await (await db()).deleteTransactions(ids)
+  forgetAccounts()
+  return n
 }
 
 // ── Reading ────────────────────────────────────────────────────────────────
@@ -487,6 +500,175 @@ export async function upsertCategory(row) {
 
 export async function deleteCategory(name) {
   return (await db()).deleteCategory(name)
+}
+
+// ── Repeats: tiles you tap, and bills that come round ──────────────────────
+//
+// One table for both. See db/migrate-templates.sql for why, and lib/schedule.js
+// for the rule arithmetic — none of which is repeated per backend.
+
+/** Whether the live database can store these at all. False on a Supabase
+ *  project that has not run db/migrate-templates.sql; always true on a device
+ *  and on a fresh project. The screens ask, and say so rather than failing. */
+export async function templatesSupported() {
+  try {
+    return Boolean((await db()).capabilities().templates)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Throws on a real failure rather than returning [].
+ *
+ * Same contract as listBudgets and for the same reason: "no repeats yet" and
+ * "the network dropped" look identical on screen and only one of them is true.
+ * Today catches it and simply shows no tiles; the Repeats screen shows the
+ * failure. A database with no templates table is not a failure — the backend
+ * reports [] and drops the capability flag.
+ */
+export async function listTemplates() {
+  return (await db()).listTemplates()
+}
+
+/**
+ * Everything that goes in a row, and nothing else.
+ *
+ * Built explicitly rather than spread from the caller: a stray UI-only key —
+ * `busy`, `isNew`, a React synthetic — reaches PostgREST as an unknown column
+ * and comes back 42703, which is indistinguishable on screen from the migration
+ * not having been run. It is also the boundary where a string from a form
+ * becomes a number.
+ */
+const forTemplate = (t) => ({
+  ...(t.id ? { id: t.id } : {}),
+  label: String(t.label ?? '').trim(),
+  payee: String(t.payee ?? '').trim(),
+  amount: t.amount === '' || t.amount == null ? null : Number(t.amount),
+  category: t.category || null,
+  type: t.type ?? 'expense',
+  direction: t.direction ?? 'debit',
+  method: t.method || null,
+  account: t.account || null,
+  // Same rule as a transaction: only a transfer has a destination, so a
+  // template that stops being one cannot leave an envelope being credited by a
+  // payment that no longer goes there.
+  to_account: t.type === 'transfer' ? t.to_account || null : null,
+  note: String(t.note ?? '').trim() || null,
+  rule: t.rule ?? null,
+  // A schedule with no anchor cannot be computed. Today is the honest default:
+  // a bill created now, recurring monthly, is next due a month from now.
+  starts_on: t.rule ? t.starts_on || today() : null,
+  last_posted_on: t.last_posted_on ?? null,
+  pinned: Boolean(t.pinned),
+  hidden: Boolean(t.hidden),
+  source: t.source === 'detected' ? 'detected' : 'user',
+})
+
+/**
+ * Is this storable? Returns a sentence for the form, or null.
+ *
+ * Here rather than in the sheet because the local backend has no CHECK
+ * constraints to fall back on — Postgres would refuse an empty label and a
+ * negative amount, IndexedDB will store anything at all, and the two backends
+ * have to hold the same rows or a switch between them fails on arrival.
+ */
+export function templateProblem(t) {
+  const label = String(t?.label ?? '').trim()
+  const payee = String(t?.payee ?? '').trim()
+  if (!label) return 'A name is needed.'
+  if (label.length > 40) return 'That name is too long — 40 characters at most.'
+  if (!payee) return 'Who it is paid to is needed.'
+  if (payee.length > 120) return 'That payee name is too long.'
+
+  if (t.amount != null && t.amount !== '') {
+    const n = Number(t.amount)
+    if (!Number.isFinite(n) || n <= 0 || n > MAX_AMOUNT) return 'That amount is not a usable figure.'
+  }
+  if (!TYPES.includes(t.type ?? 'expense')) return 'That is not a kind of payment.'
+  if (!['debit', 'credit'].includes(t.direction ?? 'debit')) return 'That is not a direction.'
+  if (String(t.note ?? '').trim().length > 140) return 'That note is too long.'
+  if (t.rule) return ruleProblem(t.rule)
+  return null
+}
+
+export async function saveTemplate(t) {
+  const problem = templateProblem(t)
+  if (problem) throw new Error(problem)
+  return (await db()).upsertTemplate(forTemplate(t))
+}
+
+export async function removeTemplate(id) {
+  if (!id) return
+  return (await db()).deleteTemplate(id)
+}
+
+/**
+ * Log the payment a template describes.
+ *
+ * Goes through saveTransactions like everything else, so it gets the same
+ * dedup, the same amount ceiling, and the same cache invalidation. Nothing here
+ * writes to the transactions table directly.
+ *
+ * A tile and a bill want opposite things from dedup, so they are given
+ * different references. Decided here rather than by each caller, because
+ * getting it wrong is invisible on screen either way:
+ *
+ *   A tile is an instruction. You tapped it, so the payment happened, and the
+ *   only acceptable failure is on the side of recording it. Two chais on one
+ *   afternoon are two payments — and synthRef keys a manual row on
+ *   date+amount+payee, so a shared reference would silently swallow the second
+ *   as a re-upload of the first. A clock stamp is not enough on its own: it is
+ *   second-granular, and two taps can land inside one second. So a tap gets a
+ *   reference of its own and can never collide. Double-tapping is guarded where
+ *   it happens instead — the tile disables while it writes, and Today offers an
+ *   Undo on the row it just made.
+ *
+ *   A bill is an occurrence. It posts against a date and nothing else, which is
+ *   exactly what makes confirming the same one twice a no-op rather than two
+ *   rents. It keeps the derived reference, and carries no time.
+ */
+export async function postTemplate(t, { on = today(), amount, time } = {}) {
+  const value = amount ?? t.amount
+  const stamp = time !== undefined ? time : t.rule ? null : new Date().toTimeString().slice(0, 8)
+  const result = await saveTransactions([
+    {
+      ...(t.rule ? {} : { txn_ref: `tap-${crypto.randomUUID()}` }),
+      txn_date: on,
+      txn_time: stamp,
+      amount: value,
+      direction: t.direction ?? 'debit',
+      type: t.type ?? 'expense',
+      payee_raw: t.payee,
+      payee_clean: t.payee,
+      category: t.category ?? 'Other',
+      method: t.method ?? null,
+      account: t.account ?? null,
+      to_account: t.to_account ?? null,
+      note: t.note ?? null,
+      source: 'manual',
+      confidence: 1.0,
+      needs_review: false,
+    },
+  ])
+
+  // Move the bill on ONLY if the payment actually landed somewhere.
+  //
+  // A duplicate counts: that payment is already in the ledger, so the
+  // occurrence is accounted for and nagging about it again would be wrong.
+  // Nothing else does. Testing `!result.rejected` was not the same thing and
+  // was wrong in the one case that matters: a bill with no agreed amount posts
+  // `amount: null`, which saveTransactions drops at its `usable` filter and
+  // reports as `unusable` with `rejected: 0` — so the bill advanced a month,
+  // left the due list, and wrote no transaction at all.
+  //
+  // Only ever forwards. Confirming an older missed occurrence after a newer one
+  // must not rewind the schedule and offer the newer one all over again.
+  if (t.rule && t.id && (result.saved || result.duplicates)) {
+    const stamp = t.last_posted_on && t.last_posted_on > on ? t.last_posted_on : on
+    await (await db()).upsertTemplate({ ...forTemplate(t), id: t.id, last_posted_on: stamp })
+  }
+  return result
 }
 
 // ── Merchant map, as data you can see and correct ──────────────────────────

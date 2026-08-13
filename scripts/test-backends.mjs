@@ -380,10 +380,11 @@ function memoryBackend({ swallow = false } = {}) {
   const mappings = []
   const budgets = []
   const categories = []
+  const templates = []
   const keyOf = (b) => `${b.scope ?? 'category'} ${b.category}`
   return {
     kind: 'memory',
-    capabilities: () => ({ toAccount: true, budgetScope: true }),
+    capabilities: () => ({ toAccount: true, budgetScope: true, templates: true }),
     ready: async () => ({ ok: true, missing: [] }),
     async insertTransactions(incoming) {
       if (swallow) return { saved: [], rejected: incoming.length }
@@ -419,11 +420,22 @@ function memoryBackend({ swallow = false } = {}) {
       else categories.push(c)
     },
     deleteCategory: async () => {},
+    listTemplates: async () => [...templates],
+    async upsertTemplate(t) {
+      if (swallow) return t
+      const next = { ...t, id: t.id ?? crypto.randomUUID() }
+      const at = templates.findIndex((x) => x.id === next.id)
+      if (at >= 0) templates[at] = next
+      else templates.push(next)
+      return next
+    },
+    deleteTemplate: async () => {},
     async clear() {
       rows.length = 0
       mappings.length = 0
       budgets.length = 0
       categories.length = 0
+      templates.length = 0
     },
   }
 }
@@ -786,6 +798,277 @@ await check('the account Hisaab keeps in their project is not their own address'
   const email = byoEmailFor('11111111-2222-4333-8444-555555555555')
   assert.match(email, /^hisaab\+/)
   assert.doesNotMatch(email, /@gmail|@example\.com$/)
+})
+
+// ── Repeats: tiles and bills ───────────────────────────────────────────────
+//
+// What earns this: a template WRITES A PAYMENT. The validation lives in
+// lib/db.js rather than in the sheet precisely because the local backend has no
+// CHECK constraints to fall back on — Postgres refuses an empty label and a
+// negative amount, IndexedDB will store anything at all, and a switch between
+// the two has to carry rows both of them accept.
+
+console.log('\nrepeats\n')
+
+await check('a tile is stored, listed and deleted', async () => {
+  await fresh()
+  const saved = await db.saveTemplate({ label: 'Chai', payee: 'Chai stall', amount: 20, category: 'Food' })
+  assert.ok(saved.id, 'a stored template needs an id')
+
+  const [stored] = await db.listTemplates()
+  assert.equal(stored.label, 'Chai')
+  assert.equal(Number(stored.amount), 20)
+  assert.equal(stored.rule, null, 'a tile has no schedule')
+
+  await db.removeTemplate(stored.id)
+  assert.deepEqual(await db.listTemplates(), [])
+})
+
+await check('editing a repeat changes it rather than adding a second', async () => {
+  await fresh()
+  const saved = await db.saveTemplate({ label: 'Chai', payee: 'Chai stall', amount: 20 })
+  await db.saveTemplate({ id: saved.id, label: 'Chai', payee: 'Chai stall', amount: 25 })
+
+  const all = await db.listTemplates()
+  assert.equal(all.length, 1)
+  assert.equal(Number(all[0].amount), 25)
+})
+
+await check('junk is refused before it reaches either backend', async () => {
+  await fresh()
+  const bad = [
+    [{ payee: 'x' }, /name is needed/],
+    [{ label: 'x' }, /paid to is needed/],
+    [{ label: 'x'.repeat(41), payee: 'y' }, /too long/],
+    [{ label: 'x', payee: 'y', amount: -5 }, /not a usable figure/],
+    [{ label: 'x', payee: 'y', amount: 0 }, /not a usable figure/],
+    [{ label: 'x', payee: 'y', amount: 1e12 }, /not a usable figure/],
+    [{ label: 'x', payee: 'y', type: 'bribe' }, /kind of payment/],
+    [{ label: 'x', payee: 'y', rule: { every: 0, unit: 'day' } }, /Repeat every/],
+    [{ label: 'x', payee: 'y', rule: { every: 1, unit: 'fortnight' } }, /unknown cadence/],
+  ]
+  for (const [row, message] of bad) {
+    await assert.rejects(() => db.saveTemplate(row), message, JSON.stringify(row))
+  }
+  assert.deepEqual(await db.listTemplates(), [], 'nothing invalid may reach the store')
+})
+
+await check('a form-only field never reaches the row', async () => {
+  await fresh()
+  // PostgREST answers 42703 for an unknown column, which on screen is
+  // indistinguishable from the migration not having been run.
+  await db.saveTemplate({
+    label: 'Chai', payee: 'Chai stall', amount: 20, busy: true, isNew: true, unit: 'none', every: 1,
+  })
+  const [stored] = await db.listTemplates()
+  for (const key of ['busy', 'isNew', 'unit', 'every', 'weekday', 'monthDay']) {
+    assert.ok(!(key in stored), `${key} must not be stored`)
+  }
+})
+
+await check('only a transfer keeps a destination', async () => {
+  await fresh()
+  await db.saveTemplate({ label: 'Rent', payee: 'Landlord', amount: 1, type: 'expense', to_account: 'Wants' })
+  const [stored] = await db.listTemplates()
+  assert.equal(stored.to_account, null, 'an expense has no destination you own')
+})
+
+await check('tapping a tile writes a payment, and twice writes two', async () => {
+  await fresh()
+  const tile = await db.saveTemplate({ label: 'Chai', payee: 'Chai stall', amount: 20, category: 'Food' })
+
+  await db.postTemplate(tile)
+  await db.postTemplate(tile)
+
+  const rows = await db.listTransactions({ limit: 10 })
+  // The bug this guards: synthRef keys a timeless manual row on
+  // date+amount+payee alone, so without the clock stamp the second chai of the
+  // day is silently swallowed as a duplicate of the first.
+  assert.equal(rows.length, 2, 'a second chai is a second payment')
+  assert.equal(rows[0].payee_clean, 'Chai stall')
+  assert.equal(rows[0].source, 'manual')
+  assert.ok(rows[0].txn_time, 'a tapped tile carries the moment it was tapped')
+})
+
+await check('confirming a bill posts it once and moves it on', async () => {
+  await fresh()
+  const bill = await db.saveTemplate({
+    label: 'Rent',
+    payee: 'Landlord',
+    amount: 18000,
+    rule: { every: 1, unit: 'month', monthDay: 5 },
+    starts_on: '2026-03-05',
+  })
+
+  await db.postTemplate(bill, { on: '2026-03-05' })
+  const [after] = await db.listTemplates()
+  assert.equal(after.last_posted_on, '2026-03-05', 'the bill has to move on')
+
+  // Confirming the same occurrence again must not book a second rent. A bill
+  // posts against a date and carries no clock, so the reference collides.
+  await db.postTemplate(after, { on: '2026-03-05' })
+  const rows = await db.listTransactions({ from: '2026-03-01', to: '2026-03-31', limit: 10 })
+  assert.equal(rows.length, 1, 'one occurrence is one payment')
+})
+
+await check('back-filling a missed occurrence never rewinds the schedule', async () => {
+  await fresh()
+  const bill = await db.saveTemplate({
+    label: 'Rent',
+    payee: 'Landlord',
+    amount: 18000,
+    rule: { every: 1, unit: 'month', monthDay: 5 },
+    starts_on: '2026-01-05',
+    last_posted_on: '2026-03-05',
+  })
+  await db.postTemplate(bill, { on: '2026-02-05' })
+  const [after] = await db.listTemplates()
+  assert.equal(after.last_posted_on, '2026-03-05', 'a back-fill must not offer March all over again')
+})
+
+await check('a repeat with no agreed amount posts the one it is given', async () => {
+  await fresh()
+  await db.saveTemplate({ label: 'Blinkit', payee: 'Blinkit', amount: '' })
+  const [stored] = await db.listTemplates()
+  assert.equal(stored.amount, null, 'no agreed price is stored as none')
+
+  await db.postTemplate(stored, { amount: 615 })
+  const [row] = await db.listTransactions({ limit: 5 })
+  assert.equal(Number(row.amount), 615)
+})
+
+await check('repeats travel with a backend switch', async () => {
+  const source = await fresh()
+  await db.saveTemplate({ label: 'Chai', payee: 'Chai stall', amount: 20 })
+  await db.saveTemplate({
+    label: 'Rent',
+    payee: 'Landlord',
+    amount: 18000,
+    rule: { every: 1, unit: 'month', monthDay: 5 },
+    starts_on: '2026-03-05',
+  })
+
+  const target = memoryBackend()
+  const out = await migrate(source, target, { mode: 'copy' })
+
+  assert.equal(out.templates.copied, 2)
+  const carried = await target.listTemplates()
+  assert.equal(carried.length, 2)
+  const rent = carried.find((t) => t.label === 'Rent')
+  // The rule is the whole feature. A copy that drops it leaves a bill that
+  // never comes due again and says nothing about it.
+  assert.deepEqual(rent.rule, { every: 1, unit: 'month', monthDay: 5 })
+  assert.equal(rent.starts_on, '2026-03-05')
+})
+
+await check('a switch will not delete repeats it could not carry', async () => {
+  const source = await fresh()
+  await db.saveTransactions([txn({ payee_raw: 'SWIGGY', txn_ref: 'keep-me', amount: 480 })])
+  await db.saveTemplate({ label: 'Rent', payee: 'Landlord', amount: 18000 })
+
+  // A destination that predates db/migrate-templates.sql, modelled the way the
+  // real one behaves: it CLAIMS the table is there and only fails on contact.
+  // The Supabase backend starts optimistic and learns from a failed read, so a
+  // capability check alone never sees this coming.
+  const unmigrated = {
+    ...memoryBackend(),
+    listTemplates: async () => [],
+    upsertTemplate: async () => {
+      throw new Error('this database has no templates table')
+    },
+  }
+
+  const out = await migrate(source, unmigrated, { mode: 'move' })
+  // Everything else still made it: a feature that cannot be carried must not
+  // abort a migration halfway and leave the user with two half ledgers.
+  assert.equal(out.transactions.copied, 1, 'the transactions still have to arrive')
+  assert.equal(out.templates.copied, 0)
+  assert.equal(out.verification.ok, false, 'a repeat that did not arrive is a failed copy')
+  assert.equal(out.cleared, false, 'nothing may be deleted that did not arrive')
+  assert.ok(out.blocked)
+  assert.equal((await source.listTemplates()).length, 1, 'still where it was')
+})
+
+await check('deleting the last row naming an account retires the account', async () => {
+  await fresh()
+  const { rows } = await db.saveTransactions([
+    txn({ payee_raw: 'AMAZON', txn_ref: 'gone', amount: 999, account: 'HDFC card', method: 'card' }),
+    txn({ payee_raw: 'SWIGGY', txn_ref: 'stays', amount: 480, account: 'SBI', method: 'gpay' }),
+  ])
+  assert.deepEqual(await db.listAccounts(), ['HDFC card', 'SBI'])
+
+  // Both lists are derived from the rows and cached, so a delete has to clear
+  // them exactly as a write does. Undoing an import is the case that matters:
+  // it is how a pile of account names arrives, and undoing it used to leave
+  // every one of them in the pickers and in what Ask sends to the model.
+  await db.deleteTransactions([rows.find((r) => r.txn_ref === 'gone').id])
+  assert.deepEqual(await db.listAccounts(), ['SBI'])
+  assert.deepEqual(await db.listMethods(), ['gpay'])
+
+  await db.deleteTransaction(rows.find((r) => r.txn_ref === 'stays').id)
+  assert.deepEqual(await db.listAccounts(), [])
+})
+
+await check('a bill with no agreed amount does not advance on an empty write', async () => {
+  await fresh()
+  const bill = await db.saveTemplate({
+    label: 'Maid',
+    payee: 'Maid',
+    amount: '', // "leave empty to be asked each time"
+    rule: { every: 1, unit: 'month', monthDay: 5 },
+    starts_on: '2026-03-05',
+  })
+  assert.equal(bill.amount, null)
+
+  // Posting it with nothing to post writes no row. The bug: `!result.rejected`
+  // read that as success, stamped last_posted_on, and the occurrence left the
+  // due list having never been recorded anywhere.
+  const result = await db.postTemplate(bill, { on: '2026-03-05' })
+  assert.equal(result.saved, 0)
+  assert.equal((await db.listTransactions({ limit: 5 })).length, 0)
+
+  const [after] = await db.listTemplates()
+  assert.equal(after.last_posted_on, null, 'a bill that wrote nothing must still be due')
+})
+
+await check('a backup fails loudly rather than writing an incomplete file', async () => {
+  const backend = await fresh()
+  await db.saveTemplate({ label: 'Rent', payee: 'Landlord', amount: 18000 })
+  // A dropped connection, not a database without the table — that one already
+  // answers [] without throwing.
+  db.installBackend(
+    { ...backend, listTemplates: async () => { throw new Error('network') } },
+    { kind: 'local' },
+  )
+  await assert.rejects(() => backup(), /network/, 'a half-read backup must not be written')
+})
+
+await check('a backup carries repeats, and one written before them still restores', async () => {
+  await fresh()
+  await db.saveTemplate({
+    label: 'Rent',
+    payee: 'Landlord',
+    amount: 18000,
+    rule: { every: 1, unit: 'month', monthDay: 5 },
+    starts_on: '2026-03-05',
+  })
+  const file = await backup()
+  assert.equal(file.templates.length, 1)
+
+  await fresh()
+  await restore(file)
+  const [back] = await db.listTemplates()
+  assert.equal(back.label, 'Rent')
+  assert.deepEqual(back.rule, { every: 1, unit: 'month', monthDay: 5 })
+
+  // A file written before repeats existed has no such key, and is incomplete
+  // rather than unreadable — which is why BACKUP_VERSION was not bumped.
+  await fresh()
+  const { templates, ...older } = file
+  void templates
+  const report = await restore(older)
+  assert.equal(report.templates.copied, 0)
+  assert.equal(report.transactions.copied, older.transactions.length)
 })
 
 console.log(`\n${passed} checks passed${failed ? `, ${failed} FAILED` : ''}\n`)

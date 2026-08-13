@@ -122,6 +122,61 @@ create table if not exists budgets (
   unique (user_id, scope, category)
 );
 
+-- ── Repeats: bills that come round, and what you log every day ────────────
+--
+-- A saved payment, optionally with a schedule attached.
+--
+--   rule is null   a tile on Today. Tap it to log the payment. Chai ₹20.
+--   rule is set    a bill. It tells you it is due; it never posts by itself.
+--
+-- One table rather than two because the columns describing the payment are
+-- identical and the only difference is whether a person wants reminding.
+--
+-- An existing database needs db/migrate-templates.sql — "if not exists" above
+-- will not add a table to a database that is already there. The app degrades
+-- rather than breaking without it: src/lib/backends/supabase.js reads a missing
+-- table as "this feature is off" and says which file to run.
+create table if not exists templates (
+  id             uuid primary key default gen_random_uuid(),
+  user_id        uuid references auth.users(id) default auth.uid(),
+
+  label          text not null check (length(label) between 1 and 40),
+
+  payee          text not null check (length(payee) between 1 and 120),
+  -- Nullable: a grocery run repeats at a different price every time, and a tile
+  -- that fills in everything but the number is still most of the typing saved.
+  amount         numeric(12,2) check (amount is null or amount > 0),
+  category       text,
+  type           text not null default 'expense'
+                 check (type in ('expense','income','investment','transfer','refund','lent','repaid')),
+  direction      text not null default 'debit' check (direction in ('debit','credit')),
+  method         text,
+  account        text,
+  to_account     text,
+  note           text check (note is null or length(note) <= 140),
+
+  -- { "every": 1, "unit": "month", "monthDay": 5 } and friends. jsonb because
+  -- the shape is the app's and only the app reads it. Postgres cannot check it
+  -- and is not asked to — src/lib/schedule.js validates every rule on the way
+  -- OUT as well as in, because jsonb will store `{"every": 0}` quite happily
+  -- and a naive date walk over that never terminates.
+  rule           jsonb,
+
+  -- Occurrences are computed from starts_on, never from the previous one, so a
+  -- bill on the 31st goes 31 Jan → 28 Feb → 31 Mar rather than ratcheting down
+  -- to the 28th and staying there.
+  starts_on      date,
+  last_posted_on date,
+
+  pinned         boolean not null default false,
+  -- "Not a bill". A tombstone naming a payee that must not be suggested again.
+  hidden         boolean not null default false,
+  source         text not null default 'user' check (source in ('user','detected')),
+  created_at     timestamptz default now()
+);
+
+create index if not exists templates_user_idx on templates (user_id);
+
 -- ── Access requests: the approval queue ───────────────────────────────────
 -- Sign-up is not self-service. Someone who is not a user types their address
 -- into the sign-in screen, Supabase refuses to create an account, and the app
@@ -223,6 +278,13 @@ alter table transactions enable row level security;
 alter table merchant_map enable row level security;
 alter table budgets enable row level security;
 alter table categories enable row level security;
+-- A template holds a payee, an amount and an account name — the same class of
+-- data as a transaction, and it gets the same protection.
+alter table templates enable row level security;
+
+drop policy if exists "own templates" on templates;
+create policy "own templates" on templates
+  for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
 
 drop policy if exists "own categories" on categories;
 create policy "own categories" on categories

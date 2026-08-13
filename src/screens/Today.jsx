@@ -2,9 +2,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { readBatch, preload } from '../lib/ocr'
 import { parseScreenshot } from '../lib/parse'
 import { categoriseBatch, persistAILearnings, learn } from '../lib/categorise'
-import { saveTransactions, listTransactions, updateTransaction, listBudgets, TOTAL_BUDGET } from '../lib/db'
+import {
+  saveTransactions, listTransactions, updateTransaction, deleteTransaction, listBudgets,
+  listTemplates, postTemplate, TOTAL_BUDGET,
+} from '../lib/db'
 import { money, iso, today, dayLabel, timeLabel, spendTotal, startOfMonth, daysInMonth } from '../lib/format'
 import { TYPE_OPTIONS } from '../lib/categories'
+import { findFrequent, FREQUENT_WINDOW } from '../lib/recurring'
+import { isDue } from '../lib/schedule'
+import { seedFromRow, seedFromTemplate, templateFromSuggestion } from '../lib/entry'
 import CategoryIcon from '../components/CategoryIcon.jsx'
 import CategoryPicker from '../components/CategoryPicker.jsx'
 import Select from '../components/Select.jsx'
@@ -44,7 +50,14 @@ function narrate(week, prev) {
   return { lede: null, tail: `${Math.abs(pct)}% ${pct > 0 ? 'above' : 'below'} the week before.` }
 }
 
-export default function Today({ onChange, reviewCount, goReview }) {
+/** The most tiles Today will ever show. Four fit across a 320px phone, and a
+ *  wall of one-tap buttons that each write a payment is not a quick way to log
+ *  — it is a quick way to log the wrong thing. */
+const MAX_TILES = 4
+
+const sameName = (a, b) => String(a ?? '').trim().toLowerCase() === String(b ?? '').trim().toLowerCase()
+
+export default function Today({ onChange, reviewCount, goReview, goRepeats }) {
   const fileRef = useRef(null)
   // A ref, not state: `ingest` closes over the state it was created with, so a
   // second batch arriving mid-read would read a stale `false` and start anyway.
@@ -59,32 +72,50 @@ export default function Today({ onChange, reviewCount, goReview }) {
   const [result, setResult] = useState(null)
   const [pending, setPending] = useState(null) // categorised rows whose save failed
   const [shared, setShared] = useState(null) // files off the share sheet, awaiting a tap
-  const [manual, setManual] = useState(false)
+  // The seed the add form opens on, or null for closed. 'blank' is its own
+  // value rather than an empty seed: a seed means "these exact values", so
+  // handing the form a blank one would overwrite the rail and pocket it is
+  // supposed to reopen on with two empty strings.
+  const [entry, setEntry] = useState(null)
   const [over, setOver] = useState(false)
   const [budget, setBudget] = useState(null) // { limit, spent } for the month
+  const [templates, setTemplates] = useState([])
+  const [tapping, setTapping] = useState(null) // the tile mid-write
+  const [undo, setUndo] = useState(null) // { id, label } — the last one-tap log
 
   const load = useCallback(async () => {
-    // The month is fetched alongside the fortnight so the budget line and the
-    // week sentence come from one round trip rather than two.
-    const from = [daysAgo(13), startOfMonth()].sort()[0]
-    const r = await listTransactions({ from, to: today(), limit: 1000 })
+    // Sixty days, because that is the window the tile suggestions are read over
+    // (lib/recurring.js). The week sentence and the month budget are both
+    // filtered out of the same rows, so widening it costs one query rather than
+    // three — and a fortnight was never enough to tell a habit from a one-off.
+    const from = [daysAgo(FREQUENT_WINDOW - 1), startOfMonth()].sort()[0]
+    const r = await listTransactions({ from, to: today(), limit: 2000 })
     setRows(r)
     setLoaded(true)
     return r
   }, [])
+
+  // Fails quiet and to []. A database that has never run
+  // db/migrate-templates.sql has no repeats, which is not an error and must not
+  // take down the one screen the app is for.
+  const loadTemplates = useCallback(
+    () => listTemplates().then(setTemplates).catch(() => setTemplates([])),
+    [],
+  )
 
   useEffect(() => {
     // Even a failed load stops the placeholders: the screen is still usable —
     // you can drop a screenshot into it — and a skeleton that never resolves is
     // worse than a real zero.
     load().catch(() => setLoaded(true))
+    loadTemplates()
     listBudgets()
       .then((b) => setBudget(b.find((x) => x.category === TOTAL_BUDGET) ?? null))
       .catch(() => {})
     // Warm Tesseract while the user is reading the screen, not after they tap.
     const id = setTimeout(preload, 400)
     return () => clearTimeout(id)
-  }, [load])
+  }, [load, loadTemplates])
 
   // The save is the last step and the only one that needs the network, so a
   // failure here costs a minute of OCR that was already correct. The rows stay
@@ -214,6 +245,68 @@ export default function Today({ onChange, reviewCount, goReview }) {
     }
   }, [rows])
 
+  /**
+   * The one-tap tiles.
+   *
+   * Two sources, in that order: what you pinned, then what the ledger suggests.
+   * A suggestion is not a stored row and never becomes one by being shown — it
+   * is four-plus identical payments in sixty days, recomputed every load, and
+   * it leaves on its own when the habit does.
+   *
+   * A payee already named by a template drops out of the suggestions whatever
+   * that template says, which is what makes "don't offer me this" work: the
+   * dismissal is a hidden row carrying the name.
+   */
+  const tiles = useMemo(() => {
+    const pinned = templates.filter((t) => t.pinned && !t.rule && !t.hidden)
+    const known = templates.map((t) => t.payee)
+    const suggested = findFrequent(rows)
+      .filter((s) => !known.some((name) => sameName(name, s.payee)))
+      .map((s) => ({ ...templateFromSuggestion(s), id: null }))
+    return [...pinned, ...suggested].slice(0, MAX_TILES)
+  }, [templates, rows])
+
+  /** Bills due today or overdue. Nothing posts itself — this is a list of
+   *  things to confirm, which is the whole difference between a reminder and
+   *  an app that invents transactions. */
+  const dueBills = useMemo(() => templates.filter((t) => t.rule && !t.hidden && isDue(t)), [templates])
+
+  async function tapTile(t) {
+    // No agreed amount — the grocery run. Everything else is filled in and the
+    // form opens on the number, which is still most of the typing saved.
+    if (t.amount == null) return setEntry(seedFromTemplate(t))
+
+    setTapping(t.id ?? t.payee)
+    setUndo(null)
+    try {
+      const result = await postTemplate(t)
+      const logged = result.rows?.[0]
+      // A duplicate here means the clock stamp collided inside one second,
+      // which is a double-tap rather than a second chai. Nothing to undo.
+      if (logged) setUndo({ id: logged.id, label: `${t.label} ₹${money(t.amount)}` })
+      await load()
+      onChange?.()
+    } catch (e) {
+      setResult({ error: e.message ?? String(e) })
+    } finally {
+      setTapping(null)
+    }
+  }
+
+  /** One tap wrote a payment, so one tap has to be able to take it back. */
+  async function undoLast() {
+    if (!undo) return
+    const { id } = undo
+    setUndo(null)
+    try {
+      await deleteTransaction(id)
+      await load()
+      onChange?.()
+    } catch (e) {
+      setResult({ error: e.message ?? String(e) })
+    }
+  }
+
   return (
     <div className="screen">
       {/* Outside .stagger — a display:none child would still claim a slot in
@@ -273,6 +366,52 @@ export default function Today({ onChange, reviewCount, goReview }) {
         {/* Renders nothing once it has been answered, or where the browser has
             already decided. */}
         <NotifyPrompt />
+
+        {dueBills.length > 0 && (
+          <button type="button" className="duebills" onClick={goRepeats}>
+            <span className="who">
+              <span className="name">
+                {dueBills.length} repeat{dueBills.length === 1 ? '' : 's'} due
+              </span>
+              <span className="meta">
+                {dueBills.slice(0, 3).map((b) => b.label).join(' · ')}
+                {dueBills.length > 3 && ` and ${dueBills.length - 3} more`}
+              </span>
+            </span>
+            <span className="amt num">
+              ₹{money(dueBills.reduce((s, b) => s + (Number(b.amount) || 0), 0))}
+            </span>
+          </button>
+        )}
+
+        {tiles.length > 0 && (
+          <div className="quicktiles" role="group" aria-label="Log something you buy often">
+            {tiles.map((t) => (
+              <button
+                key={t.id ?? t.payee}
+                type="button"
+                className="tile-add"
+                disabled={tapping != null}
+                aria-busy={tapping === (t.id ?? t.payee)}
+                onClick={() => tapTile(t)}
+              >
+                <span className="nm">{t.label}</span>
+                <span className="num">
+                  {t.amount == null ? 'Amount…' : `₹${money(t.amount)}`}
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
+
+        {undo && (
+          <p className="undoline" role="status">
+            Logged {undo.label}.{' '}
+            <button type="button" className="linkish" onClick={undoLast}>
+              Undo
+            </button>
+          </p>
+        )}
 
         {shared && (
           <SharedFiles
@@ -344,22 +483,27 @@ export default function Today({ onChange, reviewCount, goReview }) {
         </p>
       )}
 
+      {/* "Add a payment", not "Add a cash payment". The form does every rail,
+          every account and every type now — the old wording was describing the
+          limitation rather than the feature. */}
       <p style={{ textAlign: 'center', marginTop: 16 }}>
-        <button className="linkish quiet" onClick={() => setManual(true)}>
-          Add a cash payment
+        <button className="linkish quiet" onClick={() => setEntry('blank')}>
+          Add a payment
         </button>
       </p>
 
-      {/* Mounted only while open, so every cash entry starts on empty fields.
-          ManualEntry holds the sheet down through its own exit before either
-          callback fires — same contract as EditSheet. */}
-      {manual && (
+      {/* Mounted only while open, so every entry starts on the values it was
+          handed. ManualEntry holds the sheet down through its own exit before
+          either callback fires — same contract as EditSheet. */}
+      {entry && (
         <ManualEntry
-          open={manual}
-          onClose={() => setManual(false)}
+          open
+          seed={entry === 'blank' ? null : entry}
+          onClose={() => setEntry(null)}
           onSaved={async () => {
-            setManual(false)
+            setEntry(null)
             await load()
+            loadTemplates()
             onChange?.()
           }}
         />
@@ -517,6 +661,10 @@ function Found({ result, reviewCount, goReview, onRetry }) {
 export function Row({ r, onChange, showDate = false }) {
   const [open, setOpen] = useState(false)
   const [editing, setEditing] = useState(false)
+  // The add form lives on the row rather than on the screen, exactly as
+  // EditSheet does. That is what makes Duplicate work in the Ledger too without
+  // either screen knowing it exists.
+  const [duplicating, setDuplicating] = useState(false)
   const credit = r.direction === 'credit'
   const meta = [
     showDate ? dayLabel(r.txn_date) : timeLabel(r.txn_time),
@@ -558,6 +706,7 @@ export function Row({ r, onChange, showDate = false }) {
             r={r}
             onDone={() => { setOpen(false); onChange?.() }}
             onEdit={() => setEditing(true)}
+            onDuplicate={() => setDuplicating(true)}
           />
         </div>
       </div>
@@ -570,11 +719,20 @@ export function Row({ r, onChange, showDate = false }) {
           onDeleted={() => { setOpen(false); onChange?.() }}
         />
       )}
+      {duplicating && (
+        <ManualEntry
+          open
+          title="Log this again"
+          seed={seedFromRow(r)}
+          onClose={() => setDuplicating(false)}
+          onSaved={() => { setDuplicating(false); setOpen(false); onChange?.() }}
+        />
+      )}
     </li>
   )
 }
 
-function QuickEdit({ r, onDone, onEdit }) {
+function QuickEdit({ r, onDone, onEdit, onDuplicate }) {
   const [saving, setSaving] = useState(false)
 
   async function set(patch, learnIt) {
@@ -601,9 +759,16 @@ function QuickEdit({ r, onDone, onEdit }) {
         options={TYPE_OPTIONS}
         onChange={(t) => set({ type: t })}
       />
-      <button type="button" className="btn ghost small" onClick={onEdit}>
-        Edit details
-      </button>
+      <div className="rowactions">
+        <button type="button" className="btn ghost small" onClick={onEdit}>
+          Edit details
+        </button>
+        {/* Every daily repeat there is — the same auto, the same sabzi wala —
+            with no template to set up first and no guess by the app. */}
+        <button type="button" className="btn ghost small" onClick={onDuplicate}>
+          Log again
+        </button>
+      </div>
     </div>
   )
 }

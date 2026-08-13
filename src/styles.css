@@ -1767,3 +1767,131 @@ code {
   border-radius: 5px;
   background: var(--neutral);
 }
+
+/* ── Repeats: one-tap tiles, and the bills that are due ──────────────────── */
+
+/* Four across on a phone is one row of thumbs. Deliberately capped at four in
+   Today.jsx: a wall of buttons that each write a payment is a fast way to log
+   the wrong thing, not a fast way to log. */
+/* auto-fit, not a fixed four: empty tracks collapse, so two tiles fill the row
+   as two rather than huddling at the left under two columns of dead space —
+   and the label gets the width instead.
+   The 64px floor is measured, not guessed: a 320px phone leaves 288px inside
+   the screen padding, and 4×64 + 3×8 of gap is 280. At 72px it was 312, so the
+   fourth tile wrapped onto a row of its own. MAX_TILES in Today.jsx is 4, so
+   no more tracks than that are ever asked for. */
+.quicktiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(64px, 1fr));
+  gap: 8px;
+  margin: 14px 0 0;
+}
+
+.tile-add {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  align-items: flex-start;
+  padding: 11px 10px;
+  min-height: 60px;
+  background: var(--card);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  text-align: left;
+  transition: transform 160ms var(--ease-out), border-color 160ms var(--ease-out),
+    opacity 160ms var(--ease-out);
+}
+.tile-add .nm {
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1.25;
+  /* A label is capped at 40 characters and the tile is a quarter of a phone, so
+     one has to give. Two lines, then an ellipsis. */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.tile-add .num { font-size: 13.5px; font-weight: 600; letter-spacing: -0.01em; }
+@media (hover: hover) and (pointer: fine) {
+  .tile-add:hover { border-color: var(--forest-green); }
+}
+.tile-add:active { transform: scale(0.97); }
+.tile-add:disabled { opacity: 0.5; }
+/* The one mid-write. Everything else is merely disabled while it happens. */
+.tile-add[aria-busy='true'] { opacity: 0.85; border-color: var(--forest-green); }
+
+/* One tap wrote a payment, so the way back has to be on the same screen. */
+.undoline {
+  margin: 10px 2px 0;
+  font-size: 13px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.duebills {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  margin-top: 14px;
+  padding: 13px 15px;
+  background: var(--card);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  color: var(--text);
+  text-align: left;
+  transition: transform 160ms var(--ease-out), border-color 160ms var(--ease-out);
+}
+.duebills .who { flex: 1; min-width: 0; }
+.duebills .name { display: block; font-size: 14.5px; font-weight: 500; }
+.duebills .meta {
+  display: block;
+  font-size: 12.5px;
+  color: var(--muted);
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.duebills .amt { font-size: 15px; font-weight: 600; white-space: nowrap; }
+@media (hover: hover) and (pointer: fine) {
+  .duebills:hover { border-color: var(--forest-green); }
+}
+.duebills:active { transform: scale(0.99); }
+
+/* ── The add form's fold ─────────────────────────────────────────────────── */
+
+.foldtoggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin: 0 0 16px;
+  padding: 9px 0;
+  background: none;
+  border: 0;
+  border-top: 1px solid var(--rule);
+  color: var(--muted);
+  font-size: 13.5px;
+  font-weight: 500;
+  text-align: left;
+}
+.foldtoggle svg {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  transition: transform 220ms var(--ease-out);
+}
+.foldtoggle[aria-expanded='true'] svg { transform: rotate(90deg); }
+/* What is set but out of sight. Without it, closing the fold on "HDFC card ·
+   Wants" hides the two fields most likely to be wrong. */
+.foldtoggle .muted { margin-left: auto; font-size: 12.5px; }
+
+/* The fold's own padding, inside .reveal — which must keep its child bare so
+   the 0fr→1fr transition has nothing to collapse against. */
+.foldbody { padding-top: 2px; }
+
+/* Two actions on a row's drawer, since Duplicate arrived beside Edit. */
+.rowactions { display: flex; flex-wrap: wrap; gap: 8px; }

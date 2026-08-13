@@ -9,7 +9,7 @@ export const TABS = [
   ['more', 'More'],
 ]
 
-export const SUB = ['review', 'teach', 'import', 'ask', 'budgets', 'accounts', 'merchants', 'storage']
+export const SUB = ['review', 'teach', 'import', 'ask', 'budgets', 'accounts', 'repeats', 'merchants', 'storage']
 
 /**
  * The bottom bar.

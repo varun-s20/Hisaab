@@ -1,9 +1,14 @@
 import { Component, Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react'
 import { configured, getSession, onAuthChange, signOut as endSession } from './lib/auth'
-import { countNeedsReview, countUntaught, listTransactions, listBudgets, forgetCaches, TOTAL_BUDGET } from './lib/db'
+import {
+  countNeedsReview, countUntaught, listTransactions, listBudgets, listTemplates, forgetCaches,
+  TOTAL_BUDGET,
+} from './lib/db'
+import { isDue } from './lib/schedule'
 import { loadCategories, setOwner } from './lib/categories'
 import { loadMerchantMap, clearMapCache } from './lib/categorise'
 import { forgetKey } from './lib/ai'
+import { forgetEntryDefaults } from './lib/entry'
 import { today } from './lib/format'
 import * as notify from './lib/notify'
 import Nav, { TABS, SUB } from './components/Nav.jsx'
@@ -22,6 +27,7 @@ const Ask = lazy(() => import('./screens/Ask.jsx'))
 const Budgets = lazy(() => import('./screens/Budgets.jsx'))
 const Merchants = lazy(() => import('./screens/Merchants.jsx'))
 const Accounts = lazy(() => import('./screens/Accounts.jsx'))
+const Repeats = lazy(() => import('./screens/Repeats.jsx'))
 const Storage = lazy(() => import('./screens/Storage.jsx'))
 
 class ScreenBoundary extends Component {
@@ -84,6 +90,10 @@ export default function App() {
       clearMapCache()
       forgetCaches()
       forgetKey()
+      // The rail and pocket the add form reopens on. Someone else's bank name
+      // sitting in the next person's form on a shared phone is the same leak as
+      // the account list above, at a smaller scale.
+      forgetEntryDefaults()
       setOwner(s?.user?.id)
     })
   }, [])
@@ -145,15 +155,20 @@ export default function App() {
     // today" and the app can easily be open from morning to night, so a fact
     // read at 9am would nag someone who logged at noon. Nine minutes, against a
     // watcher that ticks every ten — one one-row query per tick.
-    const cache = { at: 0, hasBudget: true, loggedToday: true }
+    const cache = { at: 0, hasBudget: true, loggedToday: true, billsDue: 0 }
     const getFacts = async () => {
       if (Date.now() - cache.at > 9 * 60 * 1000) {
-        const [rows, budgets] = await Promise.all([
+        const [rows, budgets, templates] = await Promise.all([
           listTransactions({ from: today(), to: today(), limit: 1 }).catch(() => []),
           listBudgets().catch(() => null),
+          listTemplates().catch(() => []),
         ])
         cache.at = Date.now()
         cache.loggedToday = rows.length > 0
+        // Recomputed rather than stored: "due" is arithmetic on the rule and
+        // what it last posted, so confirming a bill in another tab makes this
+        // right again on the next read without anything to invalidate.
+        cache.billsDue = templates.filter((t) => t.rule && !t.hidden && isDue(t)).length
         // null means the read failed — keep the last answer rather than
         // claiming there is no budget and firing the 1st-of-month reminder at
         // someone who set one.
@@ -193,13 +208,19 @@ export default function App() {
       <ScreenBoundary key={tab}>
       <Suspense fallback={<div className="screen" />}>
         {tab === 'today' && (
-          <Today onChange={refreshCounts} reviewCount={reviewCount} goReview={() => go('review')} />
+          <Today
+            onChange={refreshCounts}
+            reviewCount={reviewCount}
+            goReview={() => go('review')}
+            goRepeats={() => go('repeats')}
+          />
         )}
         {tab === 'ledger' && <Ledger onChange={refreshCounts} />}
-        {tab === 'insights' && <Insights goAsk={() => go('ask')} />}
+        {tab === 'insights' && <Insights goAsk={() => go('ask')} goRepeats={() => go('repeats')} />}
         {tab === 'ask' && <Ask onBack={back} />}
         {tab === 'budgets' && <Budgets onBack={back} />}
         {tab === 'accounts' && <Accounts onBack={back} />}
+        {tab === 'repeats' && <Repeats onBack={back} onChange={refreshCounts} />}
         {tab === 'merchants' && <Merchants onBack={back} onChange={refreshCounts} />}
         {tab === 'review' && <Review onChange={refreshCounts} onBack={back} />}
         {tab === 'teach' && <Teach onChange={refreshCounts} onBack={back} />}
@@ -304,7 +325,10 @@ function Reminders() {
       <div className="panel switchrow">
         <label htmlFor="notify-switch">
           <span className="k">Remind me</span>
-          <span className="sub">The 1st to budget, once a day to log, Sunday if anything is waiting</span>
+          <span className="sub">
+            The 1st to budget, once a day to log, a repeat the day it falls due, Sunday if
+            anything is waiting
+          </span>
         </label>
         <button
           id="notify-switch"
@@ -356,6 +380,7 @@ const MENU = [
   ['ask', 'Ask', 'A question about your money, answered on this device'],
   ['budgets', 'Budgets', 'A number to spend against, not just one spent'],
   ['accounts', 'Accounts', 'What is left in each card, bank and envelope'],
+  ['repeats', 'Repeats', 'Bills that come round, and what you log every day'],
   ['review', 'Needs a look', 'Rows the parser wasn’t sure about'],
   ['teach', 'Teach me', 'Name the merchants it doesn’t know yet'],
   ['merchants', 'What it has learned', 'See and correct every merchant it can name'],

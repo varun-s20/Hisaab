@@ -1,5 +1,6 @@
 import {
-  activeAdapter, listBudgets, listCategories, listMerchantMap, listTransactions, snapshotTransactions,
+  activeAdapter, listBudgets, listCategories, listMerchantMap, listTemplates, listTransactions,
+  snapshotTransactions,
 } from './db.js'
 import { copyLedger } from './migrate.js'
 import { toCSV } from './csv.js'
@@ -35,10 +36,18 @@ export async function exportAll() {
 // only thing here a person cannot reconstruct by re-importing statements, and
 // a CSV of transactions does not carry it.
 
+// Deliberately not bumped when `templates` was added.
+//
+// The version gate refuses a file outright, so raising it would have made every
+// backup written before repeats existed unrestorable — for a field those files
+// simply do not have. Adding an optional key is compatible in both directions:
+// an older build ignores one it does not know about, and this one reads its
+// absence as "none". A bump is for a change that makes an old file WRONG rather
+// than incomplete.
 export const BACKUP_VERSION = 1
 
 export async function backup() {
-  const [transactions, merchants, budgets, categories] = await Promise.all([
+  const [transactions, merchants, budgets, categories, templates] = await Promise.all([
     snapshotTransactions(),
     listMerchantMap(),
     listBudgets(),
@@ -46,6 +55,16 @@ export async function backup() {
     // cache and can be a launch behind; a backup written from a cache is the
     // sort of thing you only find out about on the day you need it.
     listCategories(),
+    // A repeat cannot be rebuilt from the transactions it wrote — twelve rents
+    // in the ledger say nothing about the rule that put them there.
+    //
+    // Uncaught, like the four above it. A database with no templates table
+    // already answers [] without throwing (lib/backends/supabase.js), so the
+    // only errors a catch here could swallow are the real ones — a dropped
+    // connection, a permission failure — and a backup that quietly writes
+    // `templates: []` because the network hiccuped is discovered on the day it
+    // is restored. Failing the backup is the honest outcome.
+    listTemplates(),
   ])
   return {
     hisaab: BACKUP_VERSION,
@@ -54,6 +73,7 @@ export async function backup() {
     merchants,
     budgets,
     categories,
+    templates,
   }
 }
 
@@ -85,12 +105,15 @@ function fileBackend(data) {
   const rows = data.transactions ?? []
   return {
     kind: 'file',
-    capabilities: () => ({ toAccount: true, budgetScope: true }),
+    capabilities: () => ({ toAccount: true, budgetScope: true, templates: true }),
     ready: async () => ({ ok: true, missing: [] }),
     listAllTransactions: async ({ limit = rows.length } = {}) => rows.slice(0, limit),
     listMerchantMap: async () => data.merchants ?? [],
     listBudgets: async () => data.budgets ?? [],
     listCategories: async () => data.categories ?? [],
+    // Absent in any backup written before repeats existed, which is a file with
+    // no repeats in it rather than a file that cannot be read.
+    listTemplates: async () => data.templates ?? [],
   }
 }
 

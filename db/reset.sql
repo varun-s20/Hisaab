@@ -19,19 +19,28 @@
 select
   (select count(*) from transactions) as transactions,
   (select count(*) from merchant_map) as merchants_learned,
-  (select count(*) from budgets)      as budgets;
+  (select count(*) from budgets)      as budgets,
+  (select count(*) from categories)   as your_categories,
+  (select count(*) from templates)    as repeats;
 
--- Step 2 — the wipe. Select these three lines and run them together.
--- Order does not matter: there are no foreign keys between the three.
+-- Step 2 — the wipe. Select these five lines and run them together.
+-- Order does not matter: there are no foreign keys between them.
 delete from transactions;
 delete from merchant_map;
 delete from budgets;
+delete from categories;
+-- Repeats name a payee and an amount, so they are your data too — and a bill
+-- left behind would go on coming due against a ledger that no longer has the
+-- payments it was made from.
+delete from templates;
 
 -- Step 3 — confirm. Every count should be 0.
 select
   (select count(*) from transactions) as transactions,
   (select count(*) from merchant_map) as merchants_learned,
-  (select count(*) from budgets)      as budgets;
+  (select count(*) from budgets)      as budgets,
+  (select count(*) from categories)   as your_categories,
+  (select count(*) from templates)    as repeats;
 
 
 -- ── If you ever want to wipe only your own rows ──────────────────────────────
@@ -40,13 +49,17 @@ select
 --   delete from transactions where user_id = '00000000-0000-0000-0000-000000000000';
 --   delete from merchant_map  where user_id = '00000000-0000-0000-0000-000000000000';
 --   delete from budgets       where user_id = '00000000-0000-0000-0000-000000000000';
+--   delete from categories    where user_id = '00000000-0000-0000-0000-000000000000';
+--   delete from templates     where user_id = '00000000-0000-0000-0000-000000000000';
 
 
 -- ── What this does NOT clear ─────────────────────────────────────────────────
--- Two things live in the browser, not the database, and survive this file:
+-- What lives in the browser rather than the database, and survives this file:
 --
---   hisaab.categories   the categories you invented, in localStorage
---   theme               light / dark
+--   hisaab.categories        a mirror of the categories table, refilled from it
+--   hisaab.entry.defaults    the rail and pocket the add form reopens on
+--   hisaab.entry.fold        whether "More details" was left open
+--   theme                    light / dark
 --
 -- The rename from Paisa to Hisaab already orphaned the old `paisa.categories`
 -- key, so a renamed build starts with the fourteen built-ins regardless. To
