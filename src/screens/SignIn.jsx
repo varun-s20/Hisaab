@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { supabase, configured } from '../lib/supabase'
+import { configured, sendCode as requestCode, verifyCode as checkCode } from '../lib/auth'
 import InstallButton from '../components/InstallButton.jsx'
 
 // The app icon itself, not a second copy of the artwork — it is already
@@ -104,8 +104,7 @@ export default function SignIn() {
     // are the same string. Supabase treats the address case-insensitively; the
     // unique index on access_requests.email does not.
     const address = email.trim().toLowerCase()
-    const { error } = await supabase.auth.signInWithOtp({
-      email: address,
+    const { error } = await requestCode(address, {
       // Sign-up is by approval, not self-service. Without this, anyone with an
       // email address gets an account — and with it a token that passes
       // api/_auth.js and spends the owner's Gemini quota on every call.
@@ -132,13 +131,9 @@ export default function SignIn() {
     setBusy(true)
     setMsg(null)
     setNote(null) // "sent again" has been overtaken by whatever happens next
-    const { error } = await supabase.auth.verifyOtp({
-      email: email.trim(),
-      // 'email' covers both templates — a first-time address gets Confirm
-      // signup, a returning one gets Magic Link, and the code verifies the same.
-      token: code.trim(),
-      type: 'email',
-    })
+    // 'email' covers both templates — a first-time address gets Confirm signup,
+    // a returning one gets Magic Link, and the code verifies the same.
+    const { error } = await checkCode(email.trim(), code.trim())
     setBusy(false)
     // Expired and mistyped are the same 403 from the API, and its wording
     // ("Token has expired or is invalid") makes a typo sound unrecoverable.

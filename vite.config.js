@@ -124,7 +124,11 @@ export default defineConfig(({ mode }) => {
         // may not reach that session. They get a CacheFirst runtime rule below
         // instead, so the cost is paid once, on the first OCR.
         globPatterns: ['**/*.{js,css,html,png,svg}'],
-        globIgnores: ['**/tesseract/**'],
+        // Same argument as tesseract, smaller numbers: the setup screenshots are
+        // ~280KB and are only ever seen by someone connecting a Supabase project
+        // of their own, which most people never do. Precaching them would put
+        // that download in front of every first launch. Runtime rule below.
+        globIgnores: ['**/tesseract/**', '**/setup/**'],
         maximumFileSizeToCacheInBytes: 4 * 1024 * 1024,
         // The share-target POST must reach our own fetch handler, not the SPA
         // navigation fallback, which would swallow it and lose the files.
@@ -140,6 +144,18 @@ export default defineConfig(({ mode }) => {
             handler: 'CacheFirst',
             options: {
               cacheName: 'tesseract-assets',
+              expiration: { maxEntries: 10 },
+              cacheableResponse: { statuses: [0, 200] },
+            },
+          },
+          {
+            // Fetched the first time somebody opens the BYO setup, kept after
+            // that — so stepping back and forth through it, or coming back to
+            // finish tomorrow, costs nothing and works on a bad connection.
+            urlPattern: ({ url }) => url.pathname.startsWith('/setup/'),
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'setup-screenshots',
               expiration: { maxEntries: 10 },
               cacheableResponse: { statuses: [0, 200] },
             },

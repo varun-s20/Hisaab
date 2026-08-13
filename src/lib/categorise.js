@@ -1,5 +1,5 @@
-import { supabase } from './supabase'
-import { postJson } from './api'
+import { listMerchantMap, upsertMerchantMapping } from './db'
+import { categoriseMerchants } from './ai'
 import { isPersonal } from './parse'
 import { normalise, seedLookup, TYPE_FOR_CATEGORY } from './seeds'
 
@@ -28,14 +28,15 @@ let mapCache = null
 export async function loadMerchantMap(force = false) {
   if (mapCache && !force) return mapCache
   mapCache = new Map()
-  if (!supabase) return mapCache
-  const { data, error } = await supabase
-    .from('merchant_map')
-    // hit_count is selected because learn() increments it. Left out, `existing`
-    // was always undefined there and every write reset the counter to 1, so the
-    // "what it has learned" list ordered by it never moved off a flat tie.
-    .select('payee_pattern, payee_clean, category, default_type, source, hit_count')
-  if (!error) for (const row of data ?? []) mapCache.set(row.payee_pattern, row)
+  // Fails soft into an empty map. The cascade below degrades to seeds and the
+  // personal check without it, which is a worse categorisation and not a broken
+  // app — and this runs on every launch, including the ones where the backend
+  // is a paused project or a phone that is offline.
+  try {
+    for (const row of await listMerchantMap()) mapCache.set(row.payee_pattern, row)
+  } catch {
+    // Left empty on purpose.
+  }
   return mapCache
 }
 
@@ -115,10 +116,10 @@ export async function categoriseBatch(txns) {
   }))
 }
 
-async function askAI(merchants) {
-  const body = await postJson('/api/categorise', { merchants: merchants.slice(0, 50) })
-  return Array.isArray(body?.results) ? body.results : [] // Fail soft. Always.
-}
+// Hisaab's quota, or the user's own Gemini key if they set one — lib/ai.js
+// decides. Fail soft either way: no result means the merchant stays unknown and
+// turns up in "Teach me", which is a worse guess and not a broken import.
+const askAI = (merchants) => categoriseMerchants(merchants)
 
 /**
  * Remember a categorisation. User corrections always outrank AI guesses.
@@ -129,7 +130,6 @@ async function askAI(merchants) {
  * cache, is what refuses to overwrite a row that already exists.
  */
 export async function learn(payee_raw, { category, payee_clean, source = 'user' }) {
-  if (!supabase) return
   const payee_pattern = normalise(payee_raw)
   if (!payee_pattern) return
 
@@ -144,12 +144,8 @@ export async function learn(payee_raw, { category, payee_clean, source = 'user' 
     source,
     hit_count: (existing?.hit_count ?? 0) + 1,
   }
-  const { data } = await supabase
-    .from('merchant_map')
-    .upsert(row, { onConflict: 'user_id,payee_pattern', ignoreDuplicates: source === 'ai' })
-    .select()
-    .maybeSingle()
-  if (data) mapCache?.set(payee_pattern, data)
+  const saved = await upsertMerchantMapping(row, { ignoreDuplicates: source === 'ai' })
+  if (saved) mapCache?.set(payee_pattern, saved)
 }
 
 /** Persist whatever the AI figured out this batch, so it never asks twice. */

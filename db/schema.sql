@@ -72,6 +72,32 @@ create table if not exists merchant_map (
   unique (user_id, payee_pattern)
 );
 
+-- ── Categories you made yourself ──────────────────────────────────────────
+--
+-- Only the ones a person invents. The fourteen built-ins live in
+-- src/lib/categories.js and are not rows.
+--
+-- This used to be localStorage, on the reasoning that the category *value* is
+-- already written onto every transaction so nothing was lost across devices —
+-- only "the picker list, which is a preference". That was wrong, and the bug it
+-- caused is exactly what you would predict from it: reinstall the app and your
+-- category still appears on every row it was filed under, because the name is
+-- on the row, but it is grey and wearing the fallback glyph and cannot be
+-- removed, because the colour, the icon and the very fact that it is yours
+-- lived on the old device.
+--
+-- Run this on an existing database; `create table if not exists` above will not
+-- add it for you.
+create table if not exists categories (
+  id         uuid primary key default gen_random_uuid(),
+  user_id    uuid references auth.users(id) default auth.uid(),
+  name       text not null check (length(name) between 1 and 28),
+  color      text not null default '#E7E7E1',
+  icon       text not null default 'other',
+  created_at timestamptz default now(),
+  unique (user_id, name)
+);
+
 -- ── Budgets: the one number the ledger can't derive ───────────────────────
 -- One monthly cap per category. The reserved category '*' is the cap for the
 -- whole month across every category — a sentinel rather than a second table,
@@ -135,6 +161,59 @@ alter table access_requests enable row level security;
 -- that had already been migrated.
 drop policy if exists "anyone may ask" on access_requests;
 
+-- ── AI usage: one row per person per day ──────────────────────────────────
+--
+-- api/_auth.js verified that a caller was signed in and then threw away WHICH
+-- signed-in person they were, so any approved user could spend GEMINI_API_KEY
+-- without limit. A spent quota is not one person's problem: it is Ask and Teach
+-- going dark for everybody, including the admin, until the next reset.
+--
+-- Lives on Hisaab's project only, and is deliberately not in db/byo-setup.sql.
+-- A user whose ledger is in their own Supabase still calls Hisaab's AI
+-- endpoints as themselves, so their usage is counted here with everyone else's.
+create table if not exists ai_usage (
+  user_id uuid not null references auth.users(id) on delete cascade,
+  day     date not null default current_date,
+  calls   int  not null default 0,
+  primary key (user_id, day)
+);
+
+alter table ai_usage enable row level security;
+
+-- No policies, same as access_requests: RLS on with none means neither the anon
+-- key nor a signed-in user can read or write this table. Only the service role,
+-- from the Worker, touches it.
+
+-- Increment and return, in one statement.
+--
+-- A read-then-write from the endpoint would let two calls landing together both
+-- read the same number and each store it plus one, so a burst would cost far
+-- less than it should — which is precisely the case a rate limit exists for.
+-- `on conflict … returning` is atomic and costs one round trip.
+create or replace function bump_ai_usage(uid uuid)
+returns int
+language plpgsql
+-- Runs as the owner so the function can write a table nothing else may touch.
+security definer
+-- Pinned: without this, a caller who can create objects in a schema earlier on
+-- the search path can shadow a name used below and have it run as the owner.
+set search_path = public, pg_temp
+as $$
+declare n int;
+begin
+  insert into ai_usage (user_id, day, calls)
+       values (uid, current_date, 1)
+  on conflict (user_id, day)
+    do update set calls = ai_usage.calls + 1
+    returning calls into n;
+  return n;
+end $$;
+
+-- Callable by the service role and nothing else. Postgres grants EXECUTE to
+-- public by default, which would let any signed-in caller run it.
+revoke execute on function bump_ai_usage(uuid) from public;
+revoke execute on function bump_ai_usage(uuid) from anon, authenticated;
+
 -- ── Row level security: nobody sees anyone else's money ───────────────────
 -- Migration for a database created before unreadable rows were stored rather
 -- than dropped. No-op on a fresh schema.
@@ -143,6 +222,11 @@ alter table transactions alter column amount drop not null;
 alter table transactions enable row level security;
 alter table merchant_map enable row level security;
 alter table budgets enable row level security;
+alter table categories enable row level security;
+
+drop policy if exists "own categories" on categories;
+create policy "own categories" on categories
+  for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
 
 drop policy if exists "own rows" on transactions;
 create policy "own rows" on transactions

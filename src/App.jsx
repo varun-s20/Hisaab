@@ -1,8 +1,9 @@
 import { Component, Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react'
-import { supabase, configured } from './lib/supabase'
+import { configured, getSession, onAuthChange, signOut as endSession } from './lib/auth'
 import { countNeedsReview, countUntaught, listTransactions, listBudgets, forgetCaches, TOTAL_BUDGET } from './lib/db'
-import { setOwner } from './lib/categories'
+import { loadCategories, setOwner } from './lib/categories'
 import { loadMerchantMap, clearMapCache } from './lib/categorise'
+import { forgetKey } from './lib/ai'
 import { today } from './lib/format'
 import * as notify from './lib/notify'
 import Nav, { TABS, SUB } from './components/Nav.jsx'
@@ -21,6 +22,7 @@ const Ask = lazy(() => import('./screens/Ask.jsx'))
 const Budgets = lazy(() => import('./screens/Budgets.jsx'))
 const Merchants = lazy(() => import('./screens/Merchants.jsx'))
 const Accounts = lazy(() => import('./screens/Accounts.jsx'))
+const Storage = lazy(() => import('./screens/Storage.jsx'))
 
 class ScreenBoundary extends Component {
   state = { failed: false }
@@ -64,22 +66,26 @@ export default function App() {
 
   useEffect(() => {
     if (!configured) return setSession(null)
-    supabase.auth.getSession().then(({ data }) => {
-      setSession(data.session)
-      setOwner(data.session?.user?.id)
+    getSession().then((s) => {
+      setSession(s)
+      setOwner(s?.user?.id)
     })
-    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => {
+    return onAuthChange((s) => {
       setSession(s)
       // Everything held outside React that belongs to a person rather than to
       // the app. The tab is never reloaded between two sign-ins, so none of
       // this clears itself: the merchant map, the derived account and method
       // lists, and the custom categories in localStorage would all carry over
       // to whoever signs in next on a shared phone.
+      //
+      // forgetCaches also drops the open backend, which matters more now than
+      // it did: it may be a client authenticated against someone else's own
+      // Supabase project, and the next person's rows are not in it.
       clearMapCache()
       forgetCaches()
+      forgetKey()
       setOwner(s?.user?.id)
     })
-    return () => sub.subscription.unsubscribe()
   }, [])
 
   // Every screen is a history entry, so the Android back gesture and the
@@ -119,6 +125,11 @@ export default function App() {
   useEffect(() => {
     if (!session) return
     loadMerchantMap(true).catch(() => {})
+    // Pulls the user's own categories off the backend and adopts anything this
+    // device still holds from before they were rows. Fails quiet: the mirror in
+    // localStorage has already painted, so an offline launch keeps every colour
+    // and glyph it had yesterday.
+    loadCategories().catch(() => {})
     refreshCounts()
   }, [session, refreshCounts])
 
@@ -193,6 +204,7 @@ export default function App() {
         {tab === 'review' && <Review onChange={refreshCounts} onBack={back} />}
         {tab === 'teach' && <Teach onChange={refreshCounts} onBack={back} />}
         {tab === 'import' && <Import onChange={refreshCounts} onBack={back} />}
+        {tab === 'storage' && <Storage onBack={back} />}
         {tab === 'more' && (
           <More
             go={go}
@@ -348,6 +360,7 @@ const MENU = [
   ['teach', 'Teach me', 'Name the merchants it doesn’t know yet'],
   ['merchants', 'What it has learned', 'See and correct every merchant it can name'],
   ['import', 'Import a statement', 'Catch the days screenshots missed'],
+  ['storage', 'Where your data lives', 'Our cloud, your own Supabase, or this device alone'],
 ]
 
 /**
@@ -362,7 +375,7 @@ async function signOut() {
   } catch {
     // No Cache API, or storage refused. Signing out still has to happen.
   }
-  await supabase.auth.signOut()
+  await endSession()
 }
 
 function More({ go, email, reviewCount, untaughtCount }) {
@@ -427,12 +440,22 @@ function More({ go, email, reviewCount, untaughtCount }) {
         date, amount, merchant, category — is stored, plus the raw text of rows
         flagged for review, which is cleared once you’ve looked at them.
       </p>
+      {/* Where "stored" means is now the user's choice, so the promise has to
+          say so rather than describe one of three arrangements as though it
+          were the only one. */}
+      <p className="muted" style={{ fontSize: 12, marginTop: 10, lineHeight: 1.6 }}>
+        Where that row is stored is up to you: our database, a Supabase project
+        of your own that we hold no key to, or this device and nowhere else.
+        Under <b>Where your data lives</b>, along with how to move between them.
+      </p>
       <p className="muted" style={{ fontSize: 12, marginTop: 10, lineHeight: 1.6 }}>
         Two things reach an AI, both names only. Categorising sends merchant names it
         doesn’t recognise — never one that looks like a person. Ask sends your question
         along with the names of your categories, payment methods and accounts, and gets
         back a filter that runs here. No amount, no date, and no transaction of yours is
-        ever sent.
+        ever sent. Those two are the same wherever your data is stored — they are names, not
+        rows. Add your own Gemini key and they go straight from this device to Google
+        without passing through us at all.
       </p>
     </div>
   )

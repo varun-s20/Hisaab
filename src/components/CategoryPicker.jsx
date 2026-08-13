@@ -41,24 +41,37 @@ export default function CategoryPicker({
     setOpen(false)
   }
 
-  function create() {
+  const [saving, setSaving] = useState(false)
+
+  // Async since categories became rows rather than a device preference. The
+  // error path matters more than it used to: a failed write now means the
+  // category does not exist anywhere, and the sheet has to say so instead of
+  // closing as though it worked.
+  async function create() {
+    setSaving(true)
     try {
-      const created = addCategory(name, colour, icon)
+      const created = await addCategory(name, colour, icon)
       setList(allCategories())
       pick(created)
     } catch (e2) {
       setErr(e2.message)
+    } finally {
+      setSaving(false)
     }
   }
 
   // Two steps, inline, the same as EditSheet. Removing a category is silent
   // everywhere else in the app: it leaves every picker at once and the rows
   // already filed under it quietly count as Other from then on.
-  function drop(c) {
-    removeCategory(c)
+  async function drop(c) {
+    try {
+      await removeCategory(c)
+      if (value === c) onChange('')
+    } catch (e2) {
+      setErr(e2.message)
+    }
     setList(allCategories())
     setDropping('')
-    if (value === c) onChange('')
   }
 
   const trigger = (
@@ -192,7 +205,7 @@ export default function CategoryPicker({
                 onKeyDown={(e) => {
                   if (e.key !== 'Enter') return
                   e.preventDefault()
-                  if (name.trim()) create()
+                  if (name.trim() && !saving) create()
                 }}
                 placeholder="Pets, Gifts, Travel…"
               />
@@ -238,8 +251,13 @@ export default function CategoryPicker({
               <button type="button" className="btn ghost small" onClick={() => setAdding(false)}>
                 Cancel
               </button>
-              <button type="button" className="btn small" disabled={!name.trim()} onClick={create}>
-                Add category
+              <button
+                type="button"
+                className="btn small"
+                disabled={!name.trim() || saving}
+                onClick={create}
+              >
+                {saving ? 'Saving…' : 'Add category'}
               </button>
             </div>
           </div>

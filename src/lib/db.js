@@ -1,56 +1,97 @@
-import { supabase } from './supabase'
-import { synthRef } from './parse'
-import { normalise } from './seeds'
-import { today } from './format'
+// Extensions are explicit throughout. Vite resolves without them; plain node
+// does not, and scripts/test-backends.mjs imports this file directly.
+import { currentUserId } from './auth.js'
+import { DEFAULT, readConfig } from './backend.js'
+import { createBackend } from './backends/index.js'
+import { synthRef } from './parse.js'
+import { normalise } from './seeds.js'
+import { today } from './format.js'
 
-const BASE = [
-  'id', 'txn_ref', 'txn_date', 'txn_time', 'amount', 'direction', 'type',
-  'payee_raw', 'payee_clean', 'category', 'subcategory', 'method', 'account',
-  'source', 'confidence', 'needs_review', 'note', 'created_at',
-]
+// The ledger, whichever backend it lives in.
+//
+// Every screen imports from this file and none of them knows or cares where the
+// rows are — Hisaab's Supabase, the user's own Supabase, or IndexedDB on the
+// phone. lib/backends/* implement fifteen operations; everything below that is
+// either dispatch or computation done here, once, for all three.
+//
+// The rule that keeps this honest: the backend interface takes ids and rows,
+// never filter expressions. The moment it accepts a predicate, the local
+// backend needs a query parser, and a query parser that is subtly wrong is
+// wrong about somebody's money on a screen that looks fine.
 
-/**
- * `to_account` only exists once db/migrate-accounts.sql has run, and every read
- * and write in this file names it.
- *
- * On a database that has not run the migration each one comes back 42703,
- * `undefined_column` — which is not one broken feature but Today, Ledger,
- * Insights, Review and every save at once. A deploy that goes out ahead of the
- * SQL would take the whole app dark, and the error a person actually sees is
- * "column transactions.to_account does not exist" on a screen that has never
- * mentioned a column.
- *
- * So: try it, and if the column is genuinely not there, drop it for the rest of
- * the session. Costs one failed request on an unmigrated database, nothing at
- * all on a migrated one, and the app keeps working — minus the balances that
- * need the column, which is the honest amount of degradation.
- */
-let hasToAccount = true
+// ── Which backend is live ──────────────────────────────────────────────────
 
-const COLUMNS = () => (hasToAccount ? [...BASE, 'to_account'] : BASE).join(', ')
+let adapter = null
+let pending = null
+let activeConfig = DEFAULT
 
-const MISSING_COLUMN = '42703'
-
-/**
- * Run a PostgREST call that names `to_account`, once more without it if the
- * column turns out not to exist. `run` is handed the column list so a caller
- * can build its own select; it must return the raw `{ data, error }`.
- */
-async function withToAccount(run) {
-  const first = await run(COLUMNS())
-  if (!first?.error || first.error.code !== MISSING_COLUMN || !hasToAccount) return first
-  hasToAccount = false
-  console.warn('[db] to_account is missing — run db/migrate-accounts.sql. Account balances are off until you do.')
-  return run(COLUMNS())
+/** The live backend, opening it on first use. */
+function db() {
+  if (adapter) return Promise.resolve(adapter)
+  if (!pending) {
+    pending = (async () => {
+      const userId = await currentUserId()
+      activeConfig = readConfig(userId)
+      adapter = await createBackend(activeConfig, userId)
+      return adapter
+    })().catch((e) => {
+      // A failed open must not be cached as a permanent state — a paused
+      // project that gets woken up, or a phone that regains storage, should
+      // work on the next call rather than for the next reload.
+      pending = null
+      throw e
+    })
+  }
+  return pending
 }
 
-/** Strip what the database cannot store yet, so a write survives too. */
-const writable = (row) => {
-  if (hasToAccount) return row
-  const { to_account, ...rest } = row
-  void to_account
-  return rest
+/** What the app is currently reading and writing. For the settings screen. */
+export const activeBackendConfig = () => activeConfig
+
+/** The live backend itself. Only two callers should ever want this: the
+ *  settings screen, which hands it to lib/migrate.js as the source of a
+ *  switch, and a backup. Everything else goes through the functions below. */
+export const activeAdapter = () => db()
+
+/**
+ * Every transaction, for a backup or a switch — no window, no projection.
+ *
+ * A separate name from listTransactions because the ceiling is different and
+ * the difference matters: this one is what a person's only copy is written
+ * from, so trimming it to a screen's worth would be silent data loss in a file
+ * named "backup".
+ */
+export async function snapshotTransactions() {
+  return (await db()).listAllTransactions({ limit: 50_000 })
 }
+
+/**
+ * Point the app at a backend that is already open.
+ *
+ * A switch verifies the destination and copies rows into it before it commits,
+ * so by the time the app should start reading from it the connection has been
+ * made and tested. Installing that same instance avoids opening it twice — and
+ * on a BYO project, a second open means a second sign-in round trip.
+ */
+export function installBackend(next, config = DEFAULT) {
+  forgetAccounts()
+  adapter = next
+  pending = Promise.resolve(next)
+  activeConfig = config
+  return next
+}
+
+/**
+ * Point the app at a different backend, now.
+ *
+ * Throws if it cannot be reached, leaving the previous backend in place — a
+ * failed switch must not strand someone on a backend that does not answer.
+ */
+export async function useBackend(config, userId) {
+  return installBackend(await createBackend(config, userId), config)
+}
+
+// ── Row shaping ────────────────────────────────────────────────────────────
 
 /**
  * numeric(12,2) tops out just under ten billion. An OCR'd account number that
@@ -58,6 +99,10 @@ const writable = (row) => {
  * figure — store nothing and let the row surface in "Needs a look". Postgres
  * would otherwise raise `numeric field overflow` and reject the entire batch
  * the bad row arrived in.
+ *
+ * Enforced here rather than in a backend so the local store holds the same
+ * range Postgres does, and a migration between them can never fail on a value
+ * one accepted and the other will not.
  */
 const MAX_AMOUNT = 9_999_999_999.99
 
@@ -117,43 +162,19 @@ function forInsert(t) {
   }
 }
 
-/**
- * Insert rows, isolating a bad one instead of losing the batch with it.
- *
- * A multi-row insert is a single statement: one duplicate that slipped past the
- * pre-check below, or one row Postgres rejects for any other reason, aborts all
- * of it. Halving on a constraint error keeps the loss to the row that caused
- * it — a concurrent second upload used to take every unrelated transaction in
- * its batch down with the one row it shared.
- */
-async function insertRows(rows) {
-  if (rows.length === 0) return { saved: [], rejected: 0 }
-
-  const { data, error } = await withToAccount((cols) =>
-    supabase.from('transactions').insert(rows.map(writable)).select(cols),
-  )
-  if (!error) return { saved: data ?? [], rejected: 0 }
-
-  // Only a row-level rejection is worth isolating. Retrying a network or auth
-  // failure once per row would turn one outage into hundreds of requests.
-  if (!String(error.code ?? '').startsWith('23')) throw error
-  if (rows.length === 1) return { saved: [], rejected: 1 }
-
-  const mid = rows.length >> 1
-  const a = await insertRows(rows.slice(0, mid))
-  const b = await insertRows(rows.slice(mid))
-  return { saved: [...a.saved, ...b.saved], rejected: a.rejected + b.rejected }
-}
+// ── Writing ────────────────────────────────────────────────────────────────
 
 /**
  * Insert a batch, skipping anything whose txn_ref already exists.
  *
- * Dedup is checked client-side first so we can *report* the skip count, with
- * the unique index as the backstop for races. The index is partial
- * (`where txn_ref is not null`), which Postgres can't infer from a plain
- * upsert — hence the explicit pre-check rather than `onConflict`.
+ * Dedup is checked before the write so we can *report* the skip count. The
+ * backend enforces it again — a unique index on Postgres, an explicit check in
+ * the local store — which is what covers the race between the check and the
+ * write.
  */
 export async function saveTransactions(txns) {
+  const backend = await db()
+
   // A row only needs something to identify it. A missing amount is stored as
   // null and surfaces in "Needs a look" — dropping it here would lose the
   // transaction entirely, leaving the user a count and no way to recover it.
@@ -165,18 +186,8 @@ export async function saveTransactions(txns) {
 
   const rows = usable.map(forInsert)
   const unreadable = rows.filter((r) => r.amount == null).length
-  const refs = rows.map((r) => r.txn_ref)
 
-  // Chunked: a 400-row statement puts 400 refs in a GET query string, which is
-  // long enough for PostgREST to answer 414 instead of a row list.
-  const seen = new Set()
-  for (let i = 0; i < refs.length; i += 200) {
-    const { data: existing } = await supabase
-      .from('transactions')
-      .select('txn_ref')
-      .in('txn_ref', refs.slice(i, i + 200))
-    for (const r of existing ?? []) seen.add(r.txn_ref)
-  }
+  const seen = await backend.findExistingRefs(rows.map((r) => r.txn_ref))
 
   // Same screenshot twice inside one upload counts as a duplicate too.
   const fresh = []
@@ -191,46 +202,48 @@ export async function saveTransactions(txns) {
     return { saved: 0, duplicates, unusable, unreadable, rejected: 0, rows: [] }
   }
 
-  const { saved, rejected } = await insertRows(fresh)
+  const { saved, rejected } = await backend.insertTransactions(fresh)
   forgetAccounts() // an import is how most accounts arrive
   return { saved: saved.length, duplicates, unusable, unreadable, rejected, rows: saved }
 }
 
-/**
- * PostgREST caps a response at `max-rows` — 1000 on a default Supabase project
- * — and says nothing when it does. A `.limit(3000)` was therefore not a limit
- * of 3000, it was a silent truncation at 1000 of the *oldest* rows in the
- * window, because the ordering is newest-first. Insights would then lose whole
- * months and quietly understate every total on the screen.
- *
- * Paging round it costs one extra request per 1000 rows and removes the class
- * of bug entirely. `id` is the last sort key so a page boundary can't land in
- * the middle of a tie and repeat or skip a row.
- */
-const PAGE = 1000
+export async function updateTransaction(id, patch) {
+  const backend = await db()
+  const [row] = await backend.updateTransactions([id], patch)
+  if ('account' in patch || 'method' in patch) forgetAccounts()
+  return row ?? null
+}
+
+export async function deleteTransaction(id) {
+  await (await db()).deleteTransactions([id])
+}
+
+/** Undo an import. Deleting by the ids the insert handed back is exact — a
+ *  date range would also take rows that were already there. */
+export async function deleteTransactions(ids) {
+  if (!ids?.length) return 0
+  return (await db()).deleteTransactions(ids)
+}
+
+// ── Reading ────────────────────────────────────────────────────────────────
 
 export async function listTransactions({ from, to, limit = 500 } = {}) {
-  const page = (offset, size, cols) => {
-    let q = supabase.from('transactions').select(cols)
-    if (from) q = q.gte('txn_date', from)
-    if (to) q = q.lte('txn_date', to)
-    return q
-      .order('txn_date', { ascending: false })
-      .order('created_at', { ascending: false })
-      .order('id', { ascending: false })
-      .range(offset, offset + size - 1)
-  }
-
-  const out = []
-  while (out.length < limit) {
-    const size = Math.min(PAGE, limit - out.length)
-    const { data, error } = await withToAccount((cols) => page(out.length, size, cols))
-    if (error) throw error
-    out.push(...(data ?? []))
-    if (!data || data.length < size) break
-  }
-  return out
+  return (await db()).listTransactions({ from, to, limit })
 }
+
+export async function listNeedsReview() {
+  return (await db()).listNeedsReview()
+}
+
+export async function countNeedsReview() {
+  try {
+    return await (await db()).countNeedsReview()
+  } catch {
+    return 0
+  }
+}
+
+// ── Derived lists, computed here for every backend ─────────────────────────
 
 /** The payment rails actually present in this ledger — gpay, phonepe, cash,
  *  NEFT, or a card you named yourself. Ask needs the real list so a question
@@ -239,14 +252,13 @@ let methodCache = null
 
 export async function listMethods() {
   if (methodCache) return methodCache
-  const { data, error } = await supabase
-    .from('transactions')
-    .select('method')
-    .not('method', 'is', null)
-    .limit(2000)
-  if (error) return []
-  methodCache = [...new Set((data ?? []).map((r) => r.method).filter(Boolean))].sort()
-  return methodCache
+  try {
+    const rows = await (await db()).listAllTransactions({ limit: 2000, columns: ['method'] })
+    methodCache = [...new Set(rows.map((r) => r.method).filter(Boolean))].sort()
+    return methodCache
+  } catch {
+    return []
+  }
 }
 
 /**
@@ -260,45 +272,38 @@ export async function listMethods() {
  * its own. Typing a new one in the picker is how you make it, and it is real
  * from the moment a row carries it.
  *
- * Cached because EditSheet asks on every open, and this is the same shape as
- * listMethods above including its ceiling: 2000 rows over the wire to find ten
- * strings. A `select distinct` RPC if either ever bites.
+ * Both sides are read. An envelope you have only ever funded — money in,
+ * nothing spent yet — is still an account, and reading `account` alone made it
+ * invisible until the first time you paid from it.
  */
 let accountCache = null
 
 export async function listAccounts() {
   if (accountCache) return accountCache
-  // Degrades rather than throws: EditSheet asks for this, and an unmigrated
-  // database must not make editing a row impossible. One column instead of two,
-  // and the picker still works.
-  const { data, error } = hasToAccount
-    ? await supabase
-        .from('transactions')
-        .select('account, to_account')
-        .or('account.not.is.null,to_account.not.is.null')
-        .limit(2000)
-    : await supabase.from('transactions').select('account').not('account', 'is', null).limit(2000)
-  if (error?.code === MISSING_COLUMN) {
-    hasToAccount = false
-    return listAccounts()
+  try {
+    const backend = await db()
+    const wide = backend.capabilities().toAccount
+    const rows = await backend.listAllTransactions({
+      limit: 2000,
+      columns: wide ? ['account', 'to_account'] : ['account'],
+    })
+    const seen = new Set()
+    for (const r of rows) {
+      if (r.account) seen.add(r.account)
+      if (r.to_account) seen.add(r.to_account)
+    }
+    accountCache = [...seen].sort()
+    return accountCache
+  } catch {
+    // Degrades rather than throws: EditSheet asks for this, and a database that
+    // cannot be reached must not make editing a row impossible.
+    return []
   }
-  if (error) return []
-  // Both sides. An envelope you have only ever funded — money in, nothing spent
-  // yet — is still an account, and reading `account` alone made it invisible
-  // until the first time you paid from it.
-  const seen = new Set()
-  for (const r of data ?? []) {
-    if (r.account) seen.add(r.account)
-    if (r.to_account) seen.add(r.to_account)
-  }
-  accountCache = [...seen].sort()
-  return accountCache
 }
 
 /**
  * What is left in each account: everything that arrived, minus everything that
- * left. The number an envelope budgeter checks daily and the app could not
- * answer.
+ * left. The number an envelope budgeter checks daily.
  *
  *   in   transfers whose to_account is this one, and credits landing in it
  *   out  every debit from it, spending and transfers out alike
@@ -307,25 +312,37 @@ export async function listAccounts() {
  * else, which is the point of the type: moving your own money changes where it
  * is without changing how much of it there is.
  *
- * ponytail: summed on the device over the narrowest possible select. An
- * aggregate would need a Postgres function and a migration to go with it; this
- * is five columns and stays correct while a ledger is small enough to hold.
- * The 5000 ceiling is stated in the caller — Budgets says so on screen.
+ * ponytail: summed on the device over the narrowest possible read. An aggregate
+ * would need a Postgres function and a migration to go with it — and would then
+ * need writing a second time for the local backend. This is five columns and
+ * stays correct while a ledger is small enough to hold. The 5000 ceiling is
+ * stated in the caller — Budgets says so on screen.
  */
 export const BALANCE_ROWS = 5000
 
+/**
+ * The ceiling for anything that REWRITES rows rather than summing them.
+ *
+ * Separate from BALANCE_ROWS, and much higher, because the two are wrong in
+ * different ways when they run out. A balance computed over the most recent
+ * 5000 rows is a stated approximation that the screen says out loud. A merchant
+ * lesson applied to the most recent 5000 rows is a silent lie: the toast says
+ * "past payments included", and every payment older than that keeps the wrong
+ * category with nothing on screen to suggest it. These used to share the 5000,
+ * which the SQL version they replaced never did — a predicated UPDATE has no
+ * ceiling at all.
+ */
+const REWRITE_ROWS = 50_000
+
 export async function accountBalances() {
-  if (!hasToAccount) throw new Error('Run db/migrate-accounts.sql — this screen needs the to_account column.')
-  const { data, error } = await supabase
-    .from('transactions')
-    .select('account, to_account, amount, direction, type')
-    .or('account.not.is.null,to_account.not.is.null')
-    .limit(BALANCE_ROWS)
-  if (error?.code === MISSING_COLUMN) {
-    hasToAccount = false
+  const backend = await db()
+  if (!backend.capabilities().toAccount) {
     throw new Error('Run db/migrate-accounts.sql — this screen needs the to_account column.')
   }
-  if (error) throw error
+  const rows = await backend.listAllTransactions({
+    limit: BALANCE_ROWS,
+    columns: ['account', 'to_account', 'amount', 'direction', 'type'],
+  })
 
   const acc = new Map()
   const at = (name) => {
@@ -333,7 +350,7 @@ export async function accountBalances() {
     return acc.get(name)
   }
 
-  for (const r of data ?? []) {
+  for (const r of rows) {
     const n = Number(r.amount)
     if (!Number.isFinite(n)) continue
     // A destination only means "money arrived here" on a row that is actually a
@@ -360,24 +377,51 @@ export async function accountBalances() {
  * later type "SBI". Both sides are rewritten, because a transfer names an
  * account in `to_account` and renaming only the source would leave the other
  * half pointing at a name that no longer exists.
+ *
+ * Read, decide here, write by id. The predicate version of this
+ * (`update … where account = from`) is the kind of thing only PostgREST can do,
+ * and teaching the local backend to do it would mean a filter parser. Costs one
+ * extra read; keeps one implementation.
  */
 export async function mergeAccount(from, to) {
   const target = to?.trim() || null
   if (!from || from === target) return 0
-  for (const column of hasToAccount ? ['account', 'to_account'] : ['account']) {
-    const { error } = await supabase
-      .from('transactions')
-      .update({ [column]: target })
-      .eq(column, from)
-    if (error) throw error
+
+  const backend = await db()
+  const wide = backend.capabilities().toAccount
+  const rows = await backend.listAllTransactions({
+    // A rewrite, not a sum. Folding "SBI Bank" into "SBI" and leaving the older
+    // half of the ledger still naming the old one would split the account it
+    // was meant to merge, and the balances screen would show both.
+    limit: REWRITE_ROWS,
+    columns: wide ? ['id', 'account', 'to_account'] : ['id', 'account'],
+  })
+
+  // Three shapes of patch, so three groups. A row naming `from` on both sides
+  // is a transfer to itself and needs both rewritten in one update, or the
+  // second write would find nothing left to match.
+  const both = []
+  const source = []
+  const destination = []
+  for (const r of rows) {
+    const isSource = r.account === from
+    const isDestination = wide && r.to_account === from
+    if (isSource && isDestination) both.push(r.id)
+    else if (isSource) source.push(r.id)
+    else if (isDestination) destination.push(r.id)
   }
+
+  await backend.updateTransactions(both, { account: target, to_account: target })
+  await backend.updateTransactions(source, { account: target })
+  await backend.updateTransactions(destination, { to_account: target })
+
   // A cap set on the old name would otherwise sit there capping nothing.
-  // Untouched on an unmigrated database, where an account cap cannot exist.
-  if (hasScope) {
-    await supabase.from('budgets').delete().eq('scope', 'account').eq('category', from)
+  // Untouched where an account cap cannot exist.
+  if (backend.capabilities().budgetScope) {
+    await backend.deleteBudget({ scope: 'account', category: from })
   }
   forgetAccounts()
-  return 1
+  return both.length + source.length + destination.length
 }
 
 /** Both lists are read off the rows, so both go stale the moment a row is
@@ -388,58 +432,23 @@ const forgetAccounts = () => {
 }
 
 /**
- * The same wipe, for a change of user rather than a change of row.
+ * The same wipe, for a change of user rather than a change of row — and for a
+ * change of backend, which is a change of every row at once.
  *
- * These caches are somebody's bank, card and envelope names, held in a module
- * variable that survives a sign-out — the tab is never reloaded, App.jsx just
+ * These caches are somebody's bank, card and envelope names, held in module
+ * variables that survive a sign-out: the tab is never reloaded, App.jsx just
  * swaps the screen. Signing in as someone else therefore showed the previous
  * person's accounts in every picker, and Ask sent them to the model as the new
  * person's (src/screens/Ask.jsx passes listAccounts() straight to /api/ask).
+ *
+ * The backend goes with them, for the same reason and one more: it may be a
+ * client authenticated as the person who just left.
  */
-export const forgetCaches = forgetAccounts
-
-export async function listNeedsReview() {
-  const { data, error } = await withToAccount((cols) =>
-    supabase
-      .from('transactions')
-      .select(`${cols}, raw_text`)
-      .eq('needs_review', true)
-      .order('txn_date', { ascending: false }),
-  )
-  if (error) throw error
-  return data ?? []
-}
-
-export async function countNeedsReview() {
-  const { count, error } = await supabase
-    .from('transactions')
-    .select('id', { count: 'exact', head: true })
-    .eq('needs_review', true)
-  if (error) return 0
-  return count ?? 0
-}
-
-export async function updateTransaction(id, patch) {
-  const { data, error } = await withToAccount((cols) =>
-    supabase.from('transactions').update(writable(patch)).eq('id', id).select(cols).single(),
-  )
-  if (error) throw error
-  if ('account' in patch || 'method' in patch) forgetAccounts()
-  return data
-}
-
-export async function deleteTransaction(id) {
-  const { error } = await supabase.from('transactions').delete().eq('id', id)
-  if (error) throw error
-}
-
-/** Undo an import. Deleting by the ids the insert handed back is exact — a
- *  date range would also take rows that were already there. */
-export async function deleteTransactions(ids) {
-  if (!ids?.length) return 0
-  const { error } = await supabase.from('transactions').delete().in('id', ids)
-  if (error) throw error
-  return ids.length
+export function forgetCaches() {
+  forgetAccounts()
+  adapter = null
+  pending = null
+  activeConfig = DEFAULT
 }
 
 // ── Budgets ────────────────────────────────────────────────────────────────
@@ -449,108 +458,93 @@ export const TOTAL_BUDGET = '*'
 // `scope` says whether the `category` column is naming a category or an
 // account. Envelope budgeting caps the pocket rather than the kind of spending:
 // "₹7,500 into Wants this month" is the decision people actually make, and
-// which categories it lands on is the consequence. Defaulted everywhere so
-// every existing call still means what it did.
-/**
- * Same migration problem as `to_account`, on a screen that already existed:
- * without `scope` this select is a 42703 and Budgets — which worked yesterday —
- * shows a failure instead of the caps someone already set. Fall back to the old
- * shape and call everything a category budget, which is exactly what every row
- * in an unmigrated table is.
- */
-let hasScope = true
-
+// which categories it lands on is the consequence.
 export async function listBudgets() {
-  const { data, error } = hasScope
-    ? await supabase.from('budgets').select('scope, category, amount')
-    : await supabase.from('budgets').select('category, amount')
-  if (error?.code === MISSING_COLUMN) {
-    hasScope = false
-    return listBudgets()
-  }
-  // Throws rather than returning []. A budget screen that says "No budgets yet"
-  // because the network dropped is telling the user something false about their
-  // own settings; the screen knows how to show a failure.
-  if (error) throw error
-  return (data ?? []).map((b) => ({ ...b, scope: b.scope ?? 'category' }))
+  return (await db()).listBudgets()
 }
 
 export async function setBudget(category, amount, scope = 'category') {
-  // An account cap cannot be stored without the column, and silently writing it
-  // as a category budget would cap the wrong thing under the same name.
-  if (!hasScope && scope !== 'category') {
-    throw new Error('Run db/migrate-accounts.sql — an account cap needs the scope column.')
-  }
-  const { error } = hasScope
-    ? await supabase
-        .from('budgets')
-        .upsert({ scope, category, amount }, { onConflict: 'user_id,scope,category' })
-    : await supabase.from('budgets').upsert({ category, amount }, { onConflict: 'user_id,category' })
-  if (error?.code === MISSING_COLUMN) {
-    hasScope = false
-    return setBudget(category, amount, scope)
-  }
-  if (error) throw error
+  return (await db()).upsertBudget({ scope, category, amount })
 }
 
 export async function removeBudget(category, scope = 'category') {
-  let q = supabase.from('budgets').delete().eq('category', category)
-  if (hasScope) q = q.eq('scope', scope)
-  const { error } = await q
-  if (error?.code === MISSING_COLUMN) {
-    hasScope = false
-    return removeBudget(category, scope)
-  }
-  if (error) throw error
+  return (await db()).deleteBudget({ scope, category })
+}
+
+// ── Categories the user made ───────────────────────────────────────────────
+// The fourteen built-ins are in lib/categories.js and are not rows. These are
+// only the ones somebody invented, and they are stored rather than remembered
+// so that "Therapy" comes back on a new phone as itself — its colour, its
+// glyph, and removable — instead of as grey text nobody can get rid of.
+
+export async function listCategories() {
+  return (await db()).listCategories()
+}
+
+export async function upsertCategory(row) {
+  return (await db()).upsertCategory(row)
+}
+
+export async function deleteCategory(name) {
+  return (await db()).deleteCategory(name)
 }
 
 // ── Merchant map, as data you can see and correct ──────────────────────────
+
 export async function listMerchantMap() {
-  const { data, error } = await supabase
-    .from('merchant_map')
-    .select('payee_pattern, payee_clean, category, source, hit_count')
-    .order('hit_count', { ascending: false })
-  if (error) throw error
-  return data ?? []
+  return (await db()).listMerchantMap()
+}
+
+/** Used by lib/categorise.js, which no longer talks to a database itself. */
+export async function upsertMerchantMapping(row, options) {
+  return (await db()).upsertMerchantMapping(row, options)
 }
 
 /** Forget a mapping. The transactions keep their category; the merchant simply
  *  becomes teachable again, which is the point of doing this at all. */
 export async function deleteMerchantMapping(payee_pattern) {
-  const { error } = await supabase.from('merchant_map').delete().eq('payee_pattern', payee_pattern)
-  if (error) throw error
+  return (await db()).deleteMerchantMapping(payee_pattern)
+}
+
+/**
+ * Merchants seen in transactions that the map doesn't know yet.
+ *
+ * ponytail: scans a window of recent rows rather than asking the database to
+ * filter. One narrow read serves this, and the same code serves a backend with
+ * no query language at all. The window is the ceiling: a merchant last seen
+ * beyond it stops being offered, which for a "teach me the recent ones" queue
+ * is the right end to truncate.
+ */
+const UNTAUGHT_WINDOW = 1000
+
+export async function listUntaught(limit = 25) {
+  const rows = await (await db()).listAllTransactions({
+    limit: UNTAUGHT_WINDOW,
+    columns: ['payee_raw', 'category', 'amount', 'txn_date', 'type'],
+  })
+
+  const groups = new Map()
+  for (const r of rows) {
+    if (r.type === 'transfer') continue
+    if (r.category && r.category !== 'Other') continue
+    if (!r.payee_raw) continue
+    const g = groups.get(r.payee_raw) ?? { payee_raw: r.payee_raw, count: 0, total: 0 }
+    g.count += 1
+    g.total += Number(r.amount) || 0
+    groups.set(r.payee_raw, g)
+  }
+  return [...groups.values()].sort((a, b) => b.count - a.count).slice(0, limit)
 }
 
 /** How many merchants are waiting in "Teach me". Same query as listUntaught —
  *  the screen was the only thing that knew there was anything to do, so nobody
- *  opened it. Cheap enough to run beside countNeedsReview on every refresh. */
+ *  opened it. */
 export async function countUntaught() {
   try {
     return (await listUntaught(500)).length
   } catch {
     return 0
   }
-}
-
-/** Merchants seen in transactions that the map doesn't know yet. */
-export async function listUntaught(limit = 25) {
-  const { data, error } = await supabase
-    .from('transactions')
-    .select('payee_raw, category, amount, txn_date')
-    .or('category.is.null,category.eq.Other')
-    .neq('type', 'transfer')
-    .order('txn_date', { ascending: false })
-    .limit(200)
-  if (error) throw error
-
-  const groups = new Map()
-  for (const r of data ?? []) {
-    const g = groups.get(r.payee_raw) ?? { payee_raw: r.payee_raw, count: 0, total: 0 }
-    g.count += 1
-    g.total += Number(r.amount)
-    groups.set(r.payee_raw, g)
-  }
-  return [...groups.values()].sort((a, b) => b.count - a.count).slice(0, limit)
 }
 
 /**
@@ -562,44 +556,33 @@ export async function listUntaught(limit = 25) {
  * directions at once: spending up by the refund, money-in down by the same.
  * A credit was already typed correctly at import (income / refund / repaid);
  * teaching the merchant's category is not new information about its direction.
+ *
+ * Only rows whose type was a default get a new one. 'investment', 'lent' and
+ * 'refund' are things a person sat down and said about a specific row, and a
+ * later lesson about the merchant's *category* is not new information about any
+ * of them — teaching "SIP" used to flatten every investment under that merchant
+ * back to an expense.
  */
 async function recategoriseRaws(raws, { category, payee_clean, type }) {
   if (!raws.length) return 0
-  // Chunked for the same reason the dedup pre-check is: a few hundred names in
-  // a query string is a 414, not a row list.
-  for (let i = 0; i < raws.length; i += 100) {
-    const chunk = raws.slice(i, i + 100)
+  const backend = await db()
+  const wanted = new Set(raws)
+  const rows = await backend.listAllTransactions({
+    limit: REWRITE_ROWS,
+    columns: ['id', 'payee_raw', 'direction', 'type'],
+  })
 
-    // Only rows whose type was a default get a new one. 'investment', 'lent'
-    // and 'refund' are things a person sat down and said about a specific row,
-    // and a later lesson about the merchant's *category* is not new information
-    // about any of them — teaching "SIP" used to flatten every investment under
-    // that merchant back to an expense.
-    const { error } = await supabase
-      .from('transactions')
-      .update({ category, payee_clean, type, needs_review: false })
-      .in('payee_raw', chunk)
-      .eq('direction', 'debit')
-      .in('type', ['expense', 'transfer'])
-    if (error) throw error
-
-    // The rest keep their type and still get the name and the category.
-    const { error: keptError } = await supabase
-      .from('transactions')
-      .update({ category, payee_clean, needs_review: false })
-      .in('payee_raw', chunk)
-      .eq('direction', 'debit')
-      .not('type', 'in', '("expense","transfer")')
-    if (keptError) throw keptError
-
-    const { error: creditError } = await supabase
-      .from('transactions')
-      .update({ category, payee_clean, needs_review: false })
-      .in('payee_raw', chunk)
-      .eq('direction', 'credit')
-    if (creditError) throw creditError
+  const retyped = []
+  const kept = []
+  for (const r of rows) {
+    if (!wanted.has(r.payee_raw)) continue
+    if (r.direction === 'debit' && (r.type === 'expense' || r.type === 'transfer')) retyped.push(r.id)
+    else kept.push(r.id)
   }
-  return raws.length
+
+  await backend.updateTransactions(retyped, { category, payee_clean, type, needs_review: false })
+  await backend.updateTransactions(kept, { category, payee_clean, needs_review: false })
+  return retyped.length + kept.length
 }
 
 export const recategoriseMerchant = (payee_raw, patch) => recategoriseRaws([payee_raw], patch)
@@ -615,13 +598,14 @@ export const recategoriseMerchant = (payee_raw, patch) => recategoriseRaws([paye
  * and punctuation-free. The toast said "past payments included" and no past
  * payment had been touched.
  *
- * Postgres cannot run normalise(), so the mapping is done here: read the names,
- * match them, then write by the names that actually matched.
+ * No database can run normalise(), so the mapping is done here.
  */
 export async function recategoriseByPattern(payee_pattern, patch) {
-  const { data, error } = await supabase.from('transactions').select('payee_raw').limit(5000)
-  if (error) throw error
-  const raws = [...new Set((data ?? []).map((r) => r.payee_raw).filter(Boolean))].filter(
+  const rows = await (await db()).listAllTransactions({
+    limit: REWRITE_ROWS,
+    columns: ['payee_raw'],
+  })
+  const raws = [...new Set(rows.map((r) => r.payee_raw).filter(Boolean))].filter(
     (raw) => normalise(raw) === payee_pattern,
   )
   return recategoriseRaws(raws, patch)

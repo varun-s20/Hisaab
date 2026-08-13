@@ -73,10 +73,24 @@ export const CATEGORY_ICON = {
 }
 
 // ── Custom categories ──────────────────────────────────────────────────────
-// ponytail: localStorage, not a Supabase table. The category *value* already
-// lives on every transaction row as text, so nothing is lost across devices —
-// only the picker list, which is a preference. Move it to a `categories` table
-// the day you want the list itself to sync.
+//
+// Stored in the `categories` table, mirrored to localStorage.
+//
+// This used to be localStorage alone, on the reasoning that the category value
+// is already written onto every transaction so nothing was lost across devices
+// — "only the picker list, which is a preference". That reasoning was wrong and
+// the bug was exactly what it predicts: reinstall the app, and a category you
+// made still shows on every row it was filed under, because the NAME is on the
+// row. But colorFor() and iconFor() find nothing and fall through to Other's
+// grey and the fallback glyph, and isCustom() returns false so the remove
+// button vanishes too. Your category came back as grey text you could not
+// delete.
+//
+// The mirror stays, demoted to a cache. It is what makes the first paint
+// correct — every picker and every row icon reads these synchronously, and
+// waiting on a network round trip before drawing would flash the whole ledger
+// grey on every launch. It is also what keeps the app right when the backend is
+// offline or paused.
 const KEY = 'hisaab.categories'
 // Who the list on this device belongs to. Custom category names are not a
 // neutral preference — "Therapy", "Mum's medicines", "Divorce lawyer" — and
@@ -130,32 +144,91 @@ export function setOwner(userId) {
   cache = null
 }
 
-/** [{ name, color }] — the ones the user made. */
+/** [{ name, color, icon }] — the ones the user made. Synchronous on purpose;
+ *  see the note above the mirror. */
 export const customCategories = () => read()
 
 /** Built-ins first, then the user's own. This is what every picker shows. */
 export const allCategories = () => [...CATEGORIES, ...read().map((c) => c.name)]
+
+/**
+ * Pull the real list from whichever backend is live, and adopt anything this
+ * device has that the backend does not.
+ *
+ * The adoption step is what carries existing users across. Their categories are
+ * sitting in localStorage on the phone they made them on, and this is the one
+ * moment that can still see them — miss it and "Therapy" is gone the next time
+ * they clear their browser. It runs once per launch and is a no-op after the
+ * first, because by then the backend has them.
+ *
+ * Called from App.jsx on sign-in, beside loadMerchantMap. Failure is quiet: the
+ * mirror is already loaded, so an offline launch keeps every colour and glyph
+ * it had yesterday.
+ */
+export async function loadCategories() {
+  const { listCategories, upsertCategory } = await import('./db.js')
+  const stored = await listCategories()
+  const known = new Set(stored.map((c) => c.name))
+
+  const orphaned = read().filter((c) => !known.has(c.name))
+  for (const c of orphaned) {
+    try {
+      await upsertCategory({ name: c.name, color: c.color, icon: c.icon })
+      stored.push(c)
+    } catch {
+      // Keep it in the mirror and try again next launch rather than dropping
+      // a category on the floor because one write failed.
+    }
+  }
+
+  write(stored.map((c) => ({ name: c.name, color: c.color, icon: c.icon })))
+  return read()
+}
 
 // '*' is the reserved category the budgets table uses for the whole-month cap
 // (see db/schema.sql). A custom category by that name would upsert straight
 // onto the sentinel row and silently become the total budget.
 const RESERVED = ['*']
 
-export function addCategory(name, color, icon) {
+/**
+ * Async now, because the category has to reach the database before it can be
+ * called saved. The mirror is written first so the picker updates on the same
+ * tick — and rolled back if the write fails, rather than showing a category
+ * that only exists on this phone, which is the bug this whole change is about.
+ */
+export async function addCategory(name, color, icon) {
   const clean = String(name).trim().slice(0, 28)
   if (!clean) throw new Error('A name is needed.')
   if (RESERVED.includes(clean)) throw new Error('That name is reserved.')
   if (allCategories().some((c) => c.toLowerCase() === clean.toLowerCase())) {
     throw new Error('That category already exists.')
   }
-  write([...read(), { name: clean, color: color || '#E7E7E1', icon: icon || 'other' }])
+
+  const row = { name: clean, color: color || '#E7E7E1', icon: icon || 'other' }
+  const before = read()
+  write([...before, row])
+  try {
+    const { upsertCategory } = await import('./db.js')
+    await upsertCategory(row)
+  } catch (e) {
+    write(before)
+    throw new Error(`“${clean}” could not be saved. ${e?.message ?? ''}`.trim())
+  }
   return clean
 }
 
 /** Removing a category never touches the rows already filed under it — they
  *  keep the text and simply stop being offered in the picker. */
-export function removeCategory(name) {
-  write(read().filter((c) => c.name !== name))
+export async function removeCategory(name) {
+  const before = read()
+  write(before.filter((c) => c.name !== name))
+  try {
+    const { deleteCategory } = await import('./db.js')
+    await deleteCategory(name)
+  } catch (e) {
+    write(before)
+    throw new Error(`“${name}” could not be removed. ${e?.message ?? ''}`.trim())
+  }
 }
 
 export const colorFor = (c) =>

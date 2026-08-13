@@ -816,6 +816,56 @@ h2.section {
 .switchrow .k { display: block; font-size: 15px; font-weight: 500; color: var(--text); }
 .switchrow .sub { display: block; font-size: 12.5px; color: var(--muted); margin-top: 2px; }
 
+/* A radio with a sentence under it — "copy it across" against "move it".
+   Not a .stat: that baseline-aligns for a label/value pair, which drops the
+   control below the first line of its own description. Same trap .switchrow
+   above exists to avoid, and the whole row is the hit target either way. */
+.choicerow {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 13px 2px;
+  cursor: pointer;
+}
+.choicerow + .choicerow { border-top: 1px solid var(--rule); }
+.choicerow input {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  accent-color: var(--accent-ink);
+}
+/* The label inherits the body's 1.5-ish leading, which puts half a line of air
+   above the glyphs and drops them below the control they belong to. Tightened
+   here rather than by nudging the radio down — the control is the fixed thing
+   and the text is what was misaligned. */
+.choicerow .k {
+  display: block;
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--text);
+  line-height: 18px;
+}
+.choicerow .sub {
+  display: block;
+  font-size: 12.5px;
+  color: var(--muted);
+  margin-top: 3px;
+  line-height: 1.5;
+}
+
+/* The action row under each setup step: one thing that opens the dashboard,
+   one thing that moves you on. Both .btn.small so neither is the full-width
+   slab that .btn defaults to — these sit inside a panel, not at the end of a
+   screen, and a 100%-wide button there reads as the end of the page. */
+.setup-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: 14px 0 0;
+}
+
 /* ── Budgets ─────────────────────────────────────────────────────────────── */
 .budgetline { margin-top: 4px; }
 .budgetline-top {

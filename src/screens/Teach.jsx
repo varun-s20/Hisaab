@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { listUntaught, recategoriseMerchant } from '../lib/db'
 import { learn } from '../lib/categorise'
-import { postJson } from '../lib/api'
+import { categoriseMerchants } from '../lib/ai'
 import { CATEGORIES, allCategories } from '../lib/categories'
 import CategoryPicker from '../components/CategoryPicker.jsx'
 import ScreenHeader from '../components/ScreenHeader.jsx'
@@ -19,12 +19,10 @@ const MAX = 8
  *  can actually pick; it lives in localStorage, which the server can't see. */
 async function suggest(merchants) {
   const categories = allCategories()
-  const body = await postJson('/api/categorise', { merchants: merchants.slice(0, 50), categories })
+  const results = await categoriseMerchants(merchants.slice(0, 50), categories)
   // No suggestions is fine. The picker still works.
   return Object.fromEntries(
-    (body?.results ?? [])
-      .filter((x) => categories.includes(x.category))
-      .map((x) => [x.merchant, x.category]),
+    results.filter((x) => categories.includes(x.category)).map((x) => [x.merchant, x.category]),
   )
 }
 

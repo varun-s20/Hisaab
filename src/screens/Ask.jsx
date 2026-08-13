@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { listTransactions, listMethods, listAccounts } from '../lib/db'
 import { money, dayLabel, spendTotal, earnTotal, investTotal } from '../lib/format'
-import { postJson } from '../lib/api'
+import { askForFilter } from '../lib/ai'
 import { allCategories, colorFor } from '../lib/categories'
 import { sanitise, guess, applySpec, group, describe, uncategorisedNote } from '../lib/query'
 import ScreenHeader from '../components/ScreenHeader.jsx'
@@ -63,14 +63,17 @@ export default function Ask({ onBack }) {
       setResult(null)
 
       let local = false
-      const body = await postJson('/api/ask', {
+      // Hisaab's quota, or the user's own Gemini key if they set one. Same
+      // prompt either way (shared/gemini.js), and either way what leaves is the
+      // question plus names — never a transaction.
+      const raw = await askForFilter({
         question: text,
         today: new Date().toLocaleDateString('en-CA'), // local YYYY-MM-DD, not UTC
         categories: allCategories(),
         methods,
         accounts,
       })
-      let spec = body ? sanitise(body.spec, { methods, accounts }) : null
+      let spec = raw ? sanitise(raw, { methods, accounts }) : null
 
       if (!spec) {
         // Guarded: the local reader is the fallback, so a throw here would

@@ -11,7 +11,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "ocr": "node scripts/ocr-spike.mjs",
-    "test": "node scripts/test-parse.mjs && node scripts/test-token.mjs && node scripts/test-access.mjs && node scripts/test-inbound.mjs",
+    "test": "node scripts/test-parse.mjs && node scripts/test-token.mjs && node scripts/test-access.mjs && node scripts/test-inbound.mjs && node scripts/test-backends.mjs",
     "icons": "node scripts/make-icons.mjs",
     "push-secrets": "node scripts/push-secrets.mjs"
   },
