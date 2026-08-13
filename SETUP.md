@@ -111,17 +111,35 @@ flow — you cannot have both.
 **How you approve: from your inbox.** You no longer open the dashboard for this.
 
 1. They ask. `POST /api/access-request` writes the row and emails **you** at
-   `ADMIN_EMAIL` — the address, when they asked, and two buttons.
-2. Tap **Approve** or **Reject**. That is the whole interaction — one tap, from
-   the mail. The page it opens carries the decision out and tells you what
-   happened. Approve creates the account and emails them a magic link (plus the
+   `ADMIN_EMAIL` — the address, when they asked, and what to reply.
+2. **Reply `approve` or `reject`.** That is the whole interaction. Nothing
+   opens: the reply-to address is `hello+<request id>@yourdomain.com`, so the
+   reply lands on `/api/inbound`, which reads the first word you typed and acts
+   on it. Approve creates the account and emails them a magic link (plus the
    code route underneath it, because on Android a link may open in the wrong
-   browser). Reject emails a short decline.
+   browser). Reject emails a short decline. Either way a one-line receipt comes
+   back to you.
 3. Nothing to clean up. The row keeps its verdict, which is what stops the same
    address mailing you twice and what lets a rejected person ask again later.
 
 Ignoring the mail is still a valid answer: the request stays `pending` forever
 and the links expire after 7 days.
+
+**Why only the first word.** Every mail client quotes the original underneath
+your reply, and the original says "reply approve" — so searching the whole body
+for the word would make every reply an approval. `worker/inbound.js` stops at
+the first `>` or attribution line and reads what is above it. Anything it does
+not recognise changes nothing and asks you again, which is the safe half of the
+ambiguity. `scripts/test-inbound.mjs` asserts the quoted copy cannot decide.
+
+**Why a reply can't be forged.** The request id in the reply-to address is a
+random uuid that exists only in your own mailbox, and `/api/inbound` additionally
+refuses a reply from any address that is not `ADMIN_EMAIL`. Once a decision is
+recorded the row is no longer `pending`, so replying twice does nothing the
+second time.
+
+**The links are the fallback, in the fine print.** They exist for the case where
+inbound mail is not configured, and they still work the way they always did.
 
 **One tap, without the link itself being the trigger.** Mail clients, antivirus
 proxies and corporate link scanners fetch URLs out of inboxes with nobody

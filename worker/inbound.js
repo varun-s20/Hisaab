@@ -1,4 +1,14 @@
-// Forward mail sent to the brand address into an inbox someone actually reads.
+// Mail arriving at the brand address: a decision, or something to forward on.
+//
+// Two jobs, one webhook, because Resend delivers both to the same endpoint.
+//
+//   * A reply to "someone wants in" comes back to hello+<request id>@domain.
+//     That is an approval — the first word of the reply decides it and a
+//     receipt goes back. No browser opens at any point, which is the entire
+//     reason this path exists: tapping a link in the mail meant a page load on
+//     the app's domain, and the decision was never meant to cost that.
+//   * Anything else is somebody writing to the brand address, and gets
+//     forwarded to a human.
 //
 // Resend Inbound is not a mailbox. When mail arrives at hello@<domain> it POSTs
 // a webhook here — carrying metadata only, never the body — and the body has to
@@ -18,6 +28,9 @@
 //   * comparison is crypto.subtle.verify, not string equality on a base64
 //     digest.
 //   * a request that fails any of the above is a 400 that sends nothing.
+
+import { decideByReply, replyTag } from './access.js'
+import { receipt, send } from './lib/mail.js'
 
 const MAX_SKEW_SECONDS = 300
 
@@ -73,6 +86,77 @@ async function verified(secret, headers, rawBody) {
   return false
 }
 
+// ── Reading a one-word reply ─────────────────────────────────────────────
+
+/**
+ * What the admin actually typed, above the copy of our own mail underneath it.
+ *
+ * Every mail client quotes the original, so the naive "does the body contain
+ * the word approve" would match the instructions we sent, and every reply would
+ * be an approval. Stop at the first quote marker or attribution line and only
+ * the typed part is left.
+ */
+const firstLine = (text) => {
+  for (const raw of String(text ?? '').split(/\r?\n/)) {
+    const line = raw.trim()
+    // '>' is the quote, "On … wrote:" is Gmail and Apple Mail, '--' is a
+    // signature. Any of them means the typed part is over.
+    if (line.startsWith('>') || /wrote:\s*$/i.test(line) || /^--\s*$/.test(line)) break
+    if (line) return line
+  }
+  return ''
+}
+
+/**
+ * What counts as an answer. Anchored at the start of the typed line, so it is
+ * the opening of the reply that decides and never a word further in.
+ *
+ * Wider than "approve" and "reject" because nobody remembers a password to a
+ * feature like this: the words that come out of a person's thumbs are "yes",
+ * "let them in", "nah". Whatever is added here has to be added to the wording
+ * in worker/lib/mail.js and to `SAY_AGAIN` below — a vocabulary the mail does
+ * not print is a vocabulary nobody can use.
+ */
+const VERBS = [
+  [
+    /^(approve[ds]?|approving|accept(ed)?|allow|admit|let\s+(them|him|her|'?em)\s+in|go\s+ahead|do\s+it|yes|yep|yeah|yup|ok|okay|sure|fine|y)\b/i,
+    'approve',
+  ],
+  [
+    // `not(?!\s+sure)` because "not sure" is the one place a reject word means
+    // its opposite: hesitation, which must fall through to asking again.
+    /^(reject(ed)?|declin(e|ed)|den(y|ied)|refuse|block|keep\s+(them|him|her|'?em)\s+out|no|nope|nah|not(?!\s+sure)|never|n)\b/i,
+    'reject',
+  ],
+]
+
+/** Sent back when the reply was not one of the above. Names them, so it teaches. */
+export const SAY_AGAIN = {
+  heading: 'Say again?',
+  line: 'Nothing was changed. Reply with “approve” or “reject” — only the first word of your reply is read.',
+  note: '“yes”, “ok”, “sure” and “let them in” all count as approve. “no”, “nah”, “never” and “keep them out” all count as reject. Case and punctuation do not matter, and the request is still waiting, so a second reply decides it.',
+}
+
+/**
+ * 'approve' | 'reject' | null. The first word wins and nothing else is looked
+ * at: a reply is a human typing on a phone, and a parser that tries to be
+ * clever about "no, approve him" is a parser that will one day let the wrong
+ * person in. Anything it does not recognise gets asked again, which is the
+ * safe half of the ambiguity.
+ */
+export const readDecision = (text) => {
+  const line = firstLine(text)
+  return VERBS.find(([re]) => re.test(line))?.[1] ?? null
+}
+
+/** Last resort when a client sends HTML and no text part. */
+const detag = (html) =>
+  String(html ?? '')
+    .replace(/<blockquote[\s\S]*$/i, '') // the quoted original, in HTML replies
+    .replace(/<br\s*\/?>|<\/(p|div|tr)>/gi, '\n')
+    .replace(/<[^>]*>/g, '')
+    .replace(/&nbsp;/g, ' ')
+
 /**
  * The forwarded message. Their body is passed through as-is under a banner
  * rather than poured into the branded template: a forward that reformats the
@@ -85,10 +169,21 @@ const wrap = ({ from, to, subject, html, text, attachments }) => `
     <b style="color:#0e0f0c;">Forwarded from ${escapeHtml(to)}</b><br />
     From: ${escapeHtml(from)}<br />
     Subject: ${escapeHtml(subject || '(no subject)')}
-    ${attachments?.length ? `<br />${attachments.length} attachment${attachments.length === 1 ? '' : 's'} — open it in Resend to download.` : ''}
+    ${
+      attachments?.length
+        ? `<br />${attachments.length} attachment${
+            attachments.length === 1 ? '' : 's'
+          } — open it in Resend to download.`
+        : ''
+    }
   </div>
   <hr style="border:0;border-top:1px solid #e4e4e1;margin:18px 0;" />
-  ${html || `<pre style="white-space:pre-wrap;font-family:inherit;">${escapeHtml(text ?? '(empty message)')}</pre>`}`
+  ${
+    html ||
+    `<pre style="white-space:pre-wrap;font-family:inherit;">${escapeHtml(
+      text ?? '(empty message)',
+    )}</pre>`
+  }`
 
 /**
  * Returns a Response. Called only for /api/inbound.
@@ -137,44 +232,70 @@ export async function handleInbound(request, env) {
   const email = await got.json()
 
   const from = email?.from ?? 'unknown sender'
+  const byAdmin = String(from).toLowerCase().includes(String(env.ADMIN_EMAIL).toLowerCase())
+
+  // ── A reply that decides ──────────────────────────────────────────────
+  //
+  // Deliberately above the loop guard: this mail IS from the admin, and the
+  // guard below exists to stop exactly that being forwarded back.
+  const id = replyTag(email?.to)
+  if (id) {
+    // The id is unguessable and lives only in the admin's mailbox, so this is
+    // belt and braces — but a From header costs nothing to check, and a token
+    // that leaks (a forwarded thread, a screenshot) should not be enough on its
+    // own to let someone into the app.
+    //
+    // ponytail: `includes`, so an alias like admin+phone@ or a display name
+    // still matches. Tighten to an exact address compare if the admin address
+    // ever becomes something a stranger could contrive to appear inside.
+    if (!byAdmin) {
+      console.warn('[inbound] a decision address was replied to by somebody else')
+      return new Response('ignored', { status: 200 })
+    }
+
+    const site = (env.SITE_URL || new URL(request.url).origin).replace(/\/$/, '')
+    const decision = readDecision(email?.text || detag(email?.html))
+    const said = decision ? await decideByReply(env, id, decision, site) : SAY_AGAIN
+
+    // The receipt is the only confirmation there is — nothing in this flow
+    // renders a page — so a failure to send it is worth Svix's retry. The
+    // retried attempt finds the row already decided and says so, which is still
+    // an answer.
+    const told = await send(env, {
+      to: env.ADMIN_EMAIL,
+      subject: `Hisaab — ${said.heading.replace(/\.$/, '')}`,
+      html: receipt({ site, ...said }),
+    })
+    return told
+      ? new Response('decided', { status: 200 })
+      : new Response('decided, but the receipt did not send', { status: 500 })
+  }
 
   // Loop guard. Forwarding to ADMIN_EMAIL from MAIL_FROM means an out-of-office
   // or a bounce on the admin's side lands straight back in this webhook, and
   // each pass sends another. One comparison ends it.
-  if (String(from).toLowerCase().includes(String(env.ADMIN_EMAIL).toLowerCase())) {
+  if (byAdmin) {
     console.warn('[inbound] refusing to forward mail from the forwarding address')
     return new Response('ignored', { status: 200 })
   }
 
-  const sent = await fetch('https://api.resend.com/emails', {
-    method: 'POST',
-    headers: {
-      authorization: `Bearer ${env.RESEND_API_KEY}`,
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify({
-      from: env.MAIL_FROM,
-      to: [env.ADMIN_EMAIL],
-      // Replying goes to whoever wrote in, not to the address that forwarded
-      // it — which is the entire point of doing this rather than reading a
-      // dashboard.
-      reply_to: from,
-      subject: `Fwd: ${email?.subject || '(no subject)'}`,
-      html: wrap({
-        from,
-        to: Array.isArray(email?.to) ? email.to.join(', ') : (email?.to ?? ''),
-        subject: email?.subject,
-        html: email?.html,
-        text: email?.text,
-        attachments: email?.attachments,
-      }),
+  const sent = await send(env, {
+    to: env.ADMIN_EMAIL,
+    // Replying goes to whoever wrote in, not to the address that forwarded it —
+    // which is the entire point of doing this rather than reading a dashboard.
+    replyTo: from,
+    subject: `Fwd: ${email?.subject || '(no subject)'}`,
+    html: wrap({
+      from,
+      to: Array.isArray(email?.to) ? email.to.join(', ') : email?.to ?? '',
+      subject: email?.subject,
+      html: email?.html,
+      text: email?.text,
+      attachments: email?.attachments,
     }),
   })
 
-  if (!sent.ok) {
-    console.error('[inbound] forward', sent.status, (await sent.text()).slice(0, 300))
-    return new Response('could not forward', { status: 500 })
-  }
+  if (!sent) return new Response('could not forward', { status: 500 })
   return new Response('forwarded', { status: 200 })
 }
 

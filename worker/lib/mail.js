@@ -90,25 +90,57 @@ const fine = (html) =>
 // ── The three ────────────────────────────────────────────────────────────
 
 /**
- * To the admin. The two links are the whole feature: each is a one-shot signed
- * token, and tapping one carries the decision out without a second press. The
- * GET it lands on is still inert — the page submits itself — for the reasons
- * set out at the top of the GET handler in worker/access.js.
+ * To the admin. The reply is the feature: hit Reply, type one word, send. The
+ * reply-to address carries the request id, worker/inbound.js reads the first
+ * word, and nothing opens a browser.
+ *
+ * The two links are the fallback, in the fine print rather than as buttons —
+ * they are what still works if Resend Inbound is not configured, and tapping
+ * one is what the admin was doing before and does not want to do.
  */
 export const adminRequest = ({ site, email, asked, approveUrl, rejectUrl }) =>
   shell({
     site,
-    preview: `${email} is asking for Hisaab.`,
+    preview: `${email} is asking for Hisaab. Reply approve or reject.`,
     heading: 'Someone wants in.',
-    sub: 'A new address is waiting on the Hisaab list.',
+    sub: 'Reply to this email to decide it.',
     card: `
       ${body(`<b>${escapeHtml(email)}</b>`)}
-      <div class="dk-muted" style="font-family:${FONT};font-size:13px;color:#6a6c6a;margin-top:4px;">Asked ${escapeHtml(asked)}</div>
-      <div style="margin-top:22px;">${button(approveUrl, 'Approve')}</div>
-      <div style="margin-top:10px;">${button(rejectUrl, 'Reject', { fill: '#f1f1ed', ink: '#0e0f0c' })}</div>
+      <div class="dk-muted" style="font-family:${FONT};font-size:13px;color:#6a6c6a;margin-top:4px;">Asked ${escapeHtml(
+        asked,
+      )}</div>
+      <div class="dk-keep" style="background:#e2f6d5;border-radius:14px;padding:16px 18px;margin-top:20px;font-family:${FONT};font-size:15px;line-height:1.6;color:#163300;">
+        Reply <b>approve</b> and they are in.<br />
+        Reply <b>reject</b> to turn them down.
+      </div>
       ${fine(
-        `One tap does it. Approve creates their account and emails them a sign-in link; Reject sends a short decline and they may ask again later. Either link stops working after 7 days, or the moment you use one &mdash; whichever comes first.`,
+        // The vocabulary is printed because it cannot be guessed. Keep this in
+        // step with VERBS in worker/inbound.js — words the parser takes but the
+        // mail never mentions may as well not exist.
+        `Only the <b>first word</b> of your reply is read, so it can be a sentence.
+         <b>yes</b>, <b>ok</b>, <b>sure</b> and <b>let them in</b> all mean approve;
+         <b>no</b>, <b>nah</b>, <b>never</b> and <b>keep them out</b> all mean reject.
+         Anything else changes nothing and asks you again. A one-line receipt comes back either way,
+         and the reply works for as long as this request is still waiting.
+         <br /><br />If replying is not handy, these still work for 7 days:
+         <a href="${approveUrl}" style="color:#163300;font-weight:600;">Approve</a> &middot;
+         <a href="${rejectUrl}" style="color:#6a6c6a;">Reject</a>.`,
       )}`,
+  })
+
+/**
+ * Back to the admin once a reply has been acted on. The reply was the whole
+ * interaction — there is no page anywhere in it — so this line is the only
+ * confirmation that anything happened, and it has to arrive even when the
+ * answer is "that one was already decided".
+ */
+export const receipt = ({ site, heading, line, note }) =>
+  shell({
+    site,
+    preview: line,
+    heading,
+    sub: 'From your reply.',
+    card: `${body(escapeHtml(line))}${note ? fine(escapeHtml(note)) : ''}`,
   })
 
 /**
@@ -128,13 +160,17 @@ export const approved = ({ site, link }) =>
     heading: 'You’re in.',
     sub: 'Your request for Hisaab was approved.',
     card: link
-      ? `${body('Tap once to sign in. The link is good for an hour and works only from this inbox.')}
+      ? `${body(
+          'Tap once to sign in. The link is good for an hour and works only from this inbox.',
+        )}
          <div style="margin-top:22px;">${button(link, 'Open Hisaab')}</div>
          ${fine(
            `If the link opens the wrong browser or has expired, open Hisaab yourself, type this address on the sign-in screen, and use the six-digit code it emails you. That works every time.`,
          )}`
       : `${body(
-          `Open Hisaab at <a href="${site}" style="color:#163300;">${escapeHtml(site.replace(/^https?:\/\//, ''))}</a>, type this address on the sign-in screen, and use the six-digit code it emails you.`,
+          `Open Hisaab at <a href="${site}" style="color:#163300;">${escapeHtml(
+            site.replace(/^https?:\/\//, ''),
+          )}</a>, type this address on the sign-in screen, and use the six-digit code it emails you.`,
         )}
          ${fine('No password to invent — a code is the whole of signing in.')}`,
   })
@@ -147,7 +183,9 @@ export const declined = ({ site }) =>
     heading: 'Not this time.',
     sub: 'About your request for Hisaab.',
     card: `
-      ${body('Thanks for asking. Hisaab is invite-only and we’re not opening this one up right now.')}
+      ${body(
+        'Thanks for asking. Hisaab is invite-only and we’re not opening this one up right now.',
+      )}
       ${fine('Nothing has been created and nothing about you has been kept.')}`,
   })
 

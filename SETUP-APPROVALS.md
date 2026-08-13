@@ -15,8 +15,14 @@ Budget about 30 minutes, most of it waiting on a DNS record.
 | 2 | resend.com | Sign up, verify your sending domain, make an API key |
 | 3 | Terminal | Fill the blanks in `.env.local`, then `npm run push-secrets` |
 | 4 | Terminal | `npm run build && npx wrangler deploy` |
-| 5 | resend.com | Add the `/api/inbound` webhook, push its secret (§2b) |
+| 5 | resend.com | Add the `/api/inbound` webhook, push its secret (§2b) — **this is what makes replying work** |
 | 6 | Your phone | Ask for access from a spare address and approve yourself |
+
+Approving is a reply. The mail that lands in your inbox says *reply **approve*** or
+*reply **reject***, you type the one word, and that is the whole of it — no link,
+no browser, no page on the app's domain. Step 5 is what carries that reply back,
+so it is not optional the way it reads. The Approve / Reject links are still in
+the fine print of that mail, as the thing that works if step 5 is not done.
 
 ---
 
@@ -66,16 +72,43 @@ The Resend records are additional, not a replacement. Both can coexist — but i
 you already have a DMARC record, leave the one you have rather than adding a
 second; two DMARC TXT records at the same name make DMARC fail entirely.
 
-### 2b. Receiving — do this AFTER the first deploy
+### 2b. Receiving — do this AFTER the first deploy, and do not skip it
 
 **Resend Inbound is not a mailbox.** Mail arriving at `hello@yourdomain.com`
 triggers a webhook carrying metadata only — not even the body, which has to be
-fetched back over the API. With nothing listening, a reply to an approval or a
-decline is captured and never seen.
+fetched back over the API. With nothing listening, **replying "approve" does
+nothing at all**, and you are back to tapping links.
 
-`worker/inbound.js` is that listener: it verifies Resend's signature, fetches
-the body, and forwards the message to `ADMIN_EMAIL` with **reply-to set to
-whoever wrote in**, so answering from your own inbox reaches them.
+`worker/inbound.js` is that listener, and it does two things with what arrives:
+
+* **A reply to a "someone wants in" mail** comes back to
+  `hello+<request id>@yourdomain.com` — the reply-to address on that
+  notification, and the only thing that says which request you are answering. It
+  reads the **first word**, decides, and mails you a one-line receipt. Replies
+  from any address other than `ADMIN_EMAIL` are ignored.
+* **Anything else** is somebody writing to the brand address, and is forwarded to
+  `ADMIN_EMAIL` with **reply-to set to whoever wrote in**, so answering from your
+  own inbox reaches them.
+
+Your mail client quotes the original underneath your reply, and that quote
+contains the word *approve* — so only the part you typed, above the quote, is
+read. A reply it cannot read decides nothing and asks you again.
+
+**What you can type.** Case and punctuation are ignored, and it can be a
+sentence — only the opening is read, so *"yes, looks like a friend"* approves.
+
+| Means approve | Means reject |
+|---|---|
+| approve, accept, allow, admit | reject, decline, deny, refuse, block |
+| yes, yep, yeah, ok, sure, fine, y | no, nope, nah, never, not, n |
+| let them in, go ahead, do it | keep them out |
+
+Anything else — a question, *"not sure"*, a forwarded thread — changes nothing
+and comes back asking again, with this list in it. That reply-again mail is the
+only place the vocabulary is written down apart from the notification itself, so
+the two are kept in step deliberately: `VERBS` and `SAY_AGAIN` in
+`worker/inbound.js`, the fine print in `worker/lib/mail.js`. Add a word to one
+and you must add it to all three, or you ship a word nobody knows exists.
 
 This is deliberately out of order — the webhook needs a URL that already
 answers, so it comes after step 4:
@@ -185,13 +218,19 @@ Supabase treats them as different accounts, which is exactly what you want).
    usually hear back within 24–72 hours."*
 3. Within a few seconds, whatever you set as `ADMIN_EMAIL` gets
    *"Hisaab: … wants in"*.
-4. Tap **Approve**. One tap — the page says *Approving…*, then *Approved.*
+4. **Reply to it with the single word `approve`.** Nothing opens. A few seconds
+   later a receipt comes back: *Approved.*
 5. The test address gets *"You're in"* with an **Open Hisaab** button.
 6. Tap it. You should land signed in.
 7. Clean up: Supabase → Authentication → Users → delete the test user.
 
-**Then test Reject** with a second `+test2` address, so you have seen the decline
-mail before a real person does.
+**Then test Reject** with a second `+test2` address — reply `reject` — so you
+have seen the decline mail before a real person does.
+
+**No receipt came back?** The reply never reached the Worker. Resend → Webhooks →
+your endpoint lists every delivery; if there is no attempt at all, mail to the
+domain is not being received (§2b), and the request is still sitting there
+waiting — the Approve link in that same mail still decides it.
 
 ### If something doesn't arrive
 

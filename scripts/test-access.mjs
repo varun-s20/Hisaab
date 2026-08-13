@@ -9,7 +9,7 @@
 //   node scripts/test-access.mjs
 
 import assert from 'node:assert/strict'
-import { handleAccess } from '../worker/access.js'
+import { handleAccess, replyTag } from '../worker/access.js'
 import { sign } from '../worker/lib/token.js'
 
 const env = {
@@ -23,7 +23,9 @@ const env = {
 }
 
 const ROW = {
-  id: 'row-1',
+  // A real uuid, because it has to survive a round trip through the reply
+  // address and back out of the To header of the admin's reply.
+  id: '11111111-2222-4333-8444-555555555555',
   email: 'asker@example.com',
   status: 'pending',
   created_at: '2026-08-13T10:00:00.000Z',
@@ -31,18 +33,29 @@ const ROW = {
 }
 
 let calls = []
+let mails = []
 
 globalThis.fetch = async (url, init = {}) => {
   const method = init.method ?? 'GET'
   const path = String(url).replace(env.SUPABASE_URL, '')
   calls.push(`${method} ${path}`)
   const j = (v) =>
-    new Response(JSON.stringify(v), { status: 200, headers: { 'content-type': 'application/json' } })
+    new Response(JSON.stringify(v), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })
 
-  if (path.includes('api.resend.com')) return j({ id: 'mail-1' })
+  if (path.includes('api.resend.com')) {
+    mails.push(JSON.parse(init.body))
+    return j({ id: 'mail-1' })
+  }
   if (path.includes('/auth/v1/admin/users')) return j({ id: 'user-1' })
   if (path.includes('/auth/v1/admin/generate_link'))
-    return j({ properties: { action_link: 'https://proj.supabase.co/auth/v1/verify?token=zzz' } })
+    return j({
+      properties: {
+        action_link: 'https://proj.supabase.co/auth/v1/verify?token=zzz',
+      },
+    })
   if (path.includes('/rest/v1/access_requests')) {
     if (method === 'POST') return j([ROW]) // the upsert, returning the row
     if (method === 'PATCH') return j([])
@@ -59,6 +72,7 @@ const asked = (fragment) => calls.some((c) => c.includes(fragment))
 let passed = 0
 async function check(label, fn) {
   calls = []
+  mails = []
   await fn()
   passed++
   console.log('  ok  ', label)
@@ -68,7 +82,10 @@ const decideForm = (t, d) => {
   const f = new FormData()
   f.set('t', t)
   f.set('d', d)
-  return new Request('https://hisaab.example/api/access-decide', { method: 'POST', body: f })
+  return new Request('https://hisaab.example/api/access-decide', {
+    method: 'POST',
+    body: f,
+  })
 }
 
 const ask = (email) =>
@@ -85,6 +102,18 @@ await check('an ask records the row and mails the admin', async () => {
   assert.deepEqual(await r.json(), { ok: true })
   assert.ok(asked('api.resend.com'), 'admin should have been mailed')
   assert.ok(asked('PATCH'), 'notified_at should have been stamped')
+})
+
+await check('…and it comes back on an address that names the request', async () => {
+  await run(ask('asker@example.com'))
+  const [note] = mails
+
+  // The whole no-browser path hangs off this one header: reply-to is what
+  // carries the row id into worker/inbound.js. If it ever goes back to being
+  // the applicant's address, replies stop deciding and nothing looks broken —
+  // the mail still arrives, it just goes to the wrong person.
+  assert.equal(replyTag(note.reply_to), ROW.id, 'a reply must be able to find the row again')
+  assert.match(note.html, /Reply <b>approve<\/b>/, 'and the mail must say to reply')
 })
 
 await check('a malformed address is refused without touching anything', async () => {
@@ -105,7 +134,7 @@ await check('a missing mail secret loses the notification, not the request', asy
   assert.ok(!asked('api.resend.com'), 'nothing to send it with')
 })
 
-const approveToken = await sign({ id: 'row-1', d: 'approve' }, env.APPROVE_SECRET, 3600)
+const approveToken = await sign({ id: ROW.id, d: 'approve' }, env.APPROVE_SECRET, 3600)
 
 await check('opening the Approve link mutates NOTHING by itself', async () => {
   const r = await run(
@@ -174,7 +203,7 @@ await check('a spent token cannot be replayed', async () => {
 })
 
 await check('reject declines, mails, and creates no account', async () => {
-  const t = await sign({ id: 'row-1', d: 'reject' }, env.APPROVE_SECRET, 3600)
+  const t = await sign({ id: ROW.id, d: 'reject' }, env.APPROVE_SECRET, 3600)
   const page = await (await run(decideForm(t, 'reject'))).text()
   assert.ok(page.includes('Rejected.'))
   assert.ok(!asked('/auth/v1/admin/users'), 'reject must not create an account')

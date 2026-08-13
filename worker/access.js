@@ -8,6 +8,11 @@
 //   GET  /api/access-decide    the admin opens a link from that email
 //   POST /api/access-decide    the admin presses the button on that page
 //
+// …and the way it is actually meant to be used, which involves no browser at
+// all: the admin replies "approve" or "reject" to the notification. That reply
+// lands on worker/inbound.js, which calls decideByReply() below. The links stay
+// as a fallback — they are what works if inbound mail is not wired up.
+//
 // SECURITY, in one place, because the rest of this file assumes it:
 //
 //   * SUPABASE_SERVICE_ROLE_KEY bypasses row level security and can create
@@ -132,7 +137,9 @@ const html = (body, status = 200, nonce = null) =>
       // A nonce rather than 'unsafe-inline': the one script on this page is the
       // auto-submit below, and it is the thing that decides, so it is worth
       // naming exactly rather than opening the page to any inline script.
-      'content-security-policy': `default-src 'self'; script-src ${nonce ? `'nonce-${nonce}'` : "'none'"}; style-src 'unsafe-inline'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`,
+      'content-security-policy': `default-src 'self'; script-src ${
+        nonce ? `'nonce-${nonce}'` : "'none'"
+      }; style-src 'unsafe-inline'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`,
       'x-frame-options': 'DENY',
       'x-content-type-options': 'nosniff',
       'referrer-policy': 'no-referrer',
@@ -224,14 +231,18 @@ async function requestAccess(request, env, site) {
   }
 
   const link = async (d) =>
-    `${site}/api/access-decide?t=${encodeURIComponent(await sign({ id: row.id, d }, env.APPROVE_SECRET, DECIDE_TTL))}`
+    `${site}/api/access-decide?t=${encodeURIComponent(
+      await sign({ id: row.id, d }, env.APPROVE_SECRET, DECIDE_TTL),
+    )}`
 
   const sent = await mail.send(env, {
     to: env.ADMIN_EMAIL,
     subject: `Hisaab: ${email} wants in`,
-    // Replying to the notification reaches the person who asked, which is the
-    // one thing an admin actually wants to do from that inbox.
-    replyTo: email,
+    // Replying to the notification *is* the decision — this address carries the
+    // row id back to worker/inbound.js. It used to reach the person who asked
+    // instead, which was pleasant and is now in the way: an admin who taps Reply
+    // must land on the thing that decides, not on a conversation.
+    replyTo: replyAddress(env, row.id) ?? email,
     html: mail.adminRequest({
       site,
       email,
@@ -255,24 +266,31 @@ async function requestAccess(request, env, site) {
 
 // ── GET / POST /api/access-decide ────────────────────────────────────────
 
-/** The token's row, if the token is good and the row is still undecided. */
-async function pending(env, token) {
-  const claim = await verify(token, env.APPROVE_SECRET)
-  if (!claim?.id || (claim.d !== 'approve' && claim.d !== 'reject')) return { gone: 'expired' }
-
+/** The row, if it is there and still undecided. Marks a spent decision `gone`. */
+async function pendingRow(env, id) {
   const r = await sb(
     env,
-    `/rest/v1/access_requests?id=eq.${encodeURIComponent(claim.id)}&select=id,email,status,created_at`,
+    `/rest/v1/access_requests?id=eq.${encodeURIComponent(id)}&select=id,email,status,created_at`,
   )
   if (!r.ok) return { gone: 'error' }
   const row = (await r.json())[0]
   if (!row) return { gone: 'expired' }
   if (row.status !== 'pending') return { gone: row.status }
-  return { row, decision: claim.d }
+  return { row }
+}
+
+/** The token's row, if the token is good and the row is still undecided. */
+async function pending(env, token) {
+  const claim = await verify(token, env.APPROVE_SECRET)
+  if (!claim?.id || (claim.d !== 'approve' && claim.d !== 'reject')) return { gone: 'expired' }
+
+  const found = await pendingRow(env, claim.id)
+  return found.gone ? found : { ...found, decision: claim.d }
 }
 
 const goneLine = {
-  expired: 'That link has expired, or the request is no longer there. Ask them to request access again.',
+  expired:
+    'That link has expired, or the request is no longer there. Ask them to request access again.',
   approved: 'That request was already approved. Nothing more to do.',
   rejected: 'That request was already rejected. Nothing more to do.',
   error: 'Could not reach the database. Try the link again in a minute.',
@@ -305,6 +323,106 @@ async function letThemIn(env, email, site) {
   // Older gotrue puts it at the top level, newer nests it under properties.
   return j?.action_link ?? j?.properties?.action_link ?? null
 }
+
+/**
+ * Mark the row and tell the person. The only thing in this file that changes
+ * anything — and both ways in, the button on the page and a reply to the mail,
+ * come through here, so neither can drift from the other.
+ *
+ * Returns wording rather than a Response: one caller renders a page with it,
+ * the other puts it in an email.
+ */
+async function carryOut(env, row, decision, site) {
+  const stamp = (status) =>
+    sb(env, `/rest/v1/access_requests?id=eq.${row.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ status, decided_at: new Date().toISOString() }),
+    })
+
+  if (decision === 'reject') {
+    await stamp('rejected')
+    await mail.send(env, {
+      to: row.email,
+      subject: 'About your Hisaab request',
+      html: mail.declined({ site }),
+    })
+    return {
+      heading: 'Rejected.',
+      line: `${row.email} has been told, and no account was made.`,
+      note: null,
+    }
+  }
+
+  const link = await letThemIn(env, row.email, site)
+
+  // Marked approved even when the link could not be generated: the account
+  // exists by now, so leaving the row pending would let a second press try to
+  // create it again. The mail below handles the missing link on its own.
+  await stamp('approved')
+
+  const sent = await mail.send(env, {
+    to: row.email,
+    subject: 'You’re in — welcome to Hisaab',
+    html: mail.approved({ site, link }),
+  })
+
+  return {
+    heading: 'Approved.',
+    line: `${row.email} has an account${sent ? ' and a sign-in link on the way' : ''}.`,
+    note: sent
+      ? null
+      : 'The welcome email did not send. They can still sign in: tell them to open Hisaab and ask for a code.',
+  }
+}
+
+/**
+ * The same decision, reached by replying to the notification instead of opening
+ * one of its links. No token: the row id rides in the reply-to address, which
+ * is 122 bits of randomness that exists only in the admin's own mailbox, and
+ * worker/inbound.js additionally refuses a reply that is not from ADMIN_EMAIL.
+ *
+ * Always returns wording — the caller is a webhook with nobody to show a page
+ * to, so every outcome including "that was already decided" has to be sayable
+ * in the receipt it mails back.
+ */
+export async function decideByReply(env, id, decision, site) {
+  if (!canRecord(env)) {
+    console.error('[access] secrets missing — cannot decide')
+    return {
+      heading: 'Nothing changed.',
+      line: 'This deploy is missing its secrets.',
+      note: null,
+    }
+  }
+  const { row, gone } = await pendingRow(env, id)
+  if (gone) return { heading: 'Nothing to do.', line: goneLine[gone], note: null }
+  return carryOut(env, row, decision, site)
+}
+
+/**
+ * "Hisaab <hello@x.com>" → "hello+<row id>@x.com" — the address the admin's
+ * reply comes back on, and the only thing that tells inbound.js which request
+ * the reply is about. Plus-addressing rather than a subdomain because Resend
+ * Inbound already receives everything at this domain, and because a signed
+ * token would not fit: a local part is capped at 64 characters and one of ours
+ * runs to about 165.
+ *
+ * null if MAIL_FROM has no address in it, in which case the caller falls back
+ * to the links.
+ */
+export const replyAddress = (env, id) => {
+  const at = (String(env.MAIL_FROM ?? '').match(/<([^>]*)>/)?.[1] ?? String(env.MAIL_FROM ?? ''))
+    .trim()
+    .toLowerCase()
+  const cut = at.lastIndexOf('@')
+  return cut < 1 ? null : `${at.slice(0, cut)}+${id}${at.slice(cut)}`
+}
+
+/** The row id a reply came back on, or null if it is ordinary mail. */
+export const replyTag = (to) =>
+  String(Array.isArray(to) ? to.join(',') : to ?? '').match(
+    /\+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})@/i,
+  )?.[1] ?? null
 
 async function decide(request, env, url, site) {
   // Deciding needs everything: the database to read and mark, the secret to
@@ -376,53 +494,14 @@ async function decide(request, env, url, site) {
   const { row, gone } = await pending(env, token)
   if (gone) return dead(site, goneLine[gone])
 
-  if (pressed === 'reject') {
-    await sb(env, `/rest/v1/access_requests?id=eq.${row.id}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ status: 'rejected', decided_at: new Date().toISOString() }),
-    })
-    await mail.send(env, {
-      to: row.email,
-      subject: 'About your Hisaab request',
-      html: mail.declined({ site }),
-    })
-    return html(
-      page({
-        site,
-        title: 'Hisaab — rejected',
-        heading: 'Rejected.',
-        lead: `<p class="lead">${escapeHtml(row.email)} has been told, and no account was made.</p>`,
-      }),
-    )
-  }
-
-  const link = await letThemIn(env, row.email, site)
-
-  // Marked approved even when the link could not be generated: the account
-  // exists by now, so leaving the row pending would let a second press try to
-  // create it again. The mail below handles the missing link on its own.
-  await sb(env, `/rest/v1/access_requests?id=eq.${row.id}`, {
-    method: 'PATCH',
-    body: JSON.stringify({ status: 'approved', decided_at: new Date().toISOString() }),
-  })
-
-  const sent = await mail.send(env, {
-    to: row.email,
-    subject: 'You’re in — welcome to Hisaab',
-    html: mail.approved({ site, link }),
-  })
-
+  const { heading, line, note } = await carryOut(env, row, pressed, site)
   return html(
     page({
       site,
-      title: 'Hisaab — approved',
-      heading: 'Approved.',
-      lead: `<p class="lead">${escapeHtml(row.email)} has an account${
-        sent ? ' and a sign-in link on the way' : ''
-      }.</p>${
-        sent
-          ? ''
-          : '<p class="muted">The welcome email did not send. They can still sign in: tell them to open Hisaab and ask for a code.</p>'
+      title: `Hisaab — ${pressed === 'approve' ? 'approved' : 'rejected'}`,
+      heading,
+      lead: `<p class="lead">${escapeHtml(line)}</p>${
+        note ? `<p class="muted">${escapeHtml(note)}</p>` : ''
       }`,
     }),
   )
