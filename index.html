@@ -24,7 +24,19 @@
          else is documentation; this is the browser enforcing it. Supabase is
          the only backend, fonts are Google's, and /api/* is same-origin.
          blob: and wasm-unsafe-eval are for Tesseract, which runs its WASM core
-         in a Worker built from a blob — all of it served from /tesseract/. -->
+         in a Worker built from a blob — all of it served from /tesseract/.
+
+         generativelanguage.googleapis.com is the "bring your own key" path:
+         with a Gemini key set, src/lib/ai.js calls Google straight from the
+         browser so nothing reaches Hisaab's servers at all. Left out of this
+         list, that request was blocked before it left the page — and because
+         every AI call in this app fails soft, the whole feature was silently
+         dead for anyone who used it. A policy that forbids what the app is
+         built to do is not a tighter policy, it is a broken one.
+
+         localhost is for a Supabase instance somebody is running on their own
+         machine, which lib/backend.js accepts by design. It reaches nothing
+         that is not already on that person's computer. -->
     <meta
       http-equiv="Content-Security-Policy"
       content="default-src 'self';
@@ -33,7 +45,7 @@
                style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
                font-src 'self' https://fonts.gstatic.com;
                img-src 'self' data: blob:;
-               connect-src 'self' https://*.supabase.co wss://*.supabase.co https://fonts.googleapis.com https://fonts.gstatic.com;
+               connect-src 'self' https://*.supabase.co wss://*.supabase.co https://generativelanguage.googleapis.com https://fonts.googleapis.com https://fonts.gstatic.com http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:*;
                object-src 'none';
                base-uri 'self';
                form-action 'self';

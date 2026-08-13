@@ -14,7 +14,25 @@
 // and clearing site data takes it with everything else. The settings screen
 // says so before this mode can be turned on, and the app asks for a backup.
 
-const DB_NAME = 'hisaab'
+/**
+ * One database per signed-in person, never one for the device.
+ *
+ * A shared phone can carry two accounts, and both of them may choose "This
+ * device" — the same reasoning that keeps the backend config, the Gemini key
+ * and the custom categories keyed on the user id (lib/backend.js, lib/ai.js,
+ * lib/categories.js). A single database named for the app was the one store
+ * that missed it, and the result was the second person opening the app to the
+ * first person's ledger: every transaction, budget, repeat and merchant they
+ * had ever recorded — and then able to carry it into their own cloud account
+ * with one tap of "move to Hisaab cloud".
+ */
+const LEGACY_DB = 'hisaab'
+const dbNameFor = (userId) => (userId ? `hisaab.${userId}` : LEGACY_DB)
+
+/** Set once the legacy database has been taken over, so the next account to
+ *  sign in on this device cannot take it over again. */
+const ADOPTED_KEY = 'hisaab.local.adopted'
+
 // Bumped when a store is added. `onupgradeneeded` only fires on a version
 // change, so a device that already opened v1 would never get the categories
 // store without this and every read of it would throw NotFoundError.
@@ -28,9 +46,9 @@ const request = (req) =>
     req.onerror = () => reject(req.error ?? new Error('IndexedDB request failed'))
   })
 
-function openDatabase() {
+function openDatabase(name) {
   return new Promise((resolve, reject) => {
-    const open = indexedDB.open(DB_NAME, DB_VERSION)
+    const open = indexedDB.open(name, DB_VERSION)
     open.onupgradeneeded = () => {
       const db = open.result
       // keyPath 'id' across all three, matching the uuid primary key in
@@ -65,6 +83,98 @@ async function requestPersistence() {
   }
 }
 
+const forget = (name) =>
+  new Promise((resolve) => {
+    const req = indexedDB.deleteDatabase(name)
+    // Blocked means another tab still holds it open. The rows have already been
+    // copied by then, so the only thing left to lose is the tidying up.
+    req.onsuccess = resolve
+    req.onerror = resolve
+    req.onblocked = resolve
+  })
+
+/**
+ * Carry a pre-namespacing ledger into the database that now belongs to whoever
+ * is signed in, once, and take the old one away.
+ *
+ * Moved rather than copied, and that is the whole safety of it: after this runs
+ * there is no unowned database left for the next account on the device to open.
+ * Whoever reaches "This device" first inherits what was already there, which is
+ * the best that can be done — a database written before this change carries no
+ * record of who wrote it.
+ *
+ * Runs before the first read of every session and costs one open of a database
+ * that is not there. Fails quiet: an adoption that cannot be completed must not
+ * stop somebody reaching their own ledger.
+ */
+async function adoptLegacy(userId) {
+  if (!userId) return
+  try {
+    if (localStorage.getItem(ADOPTED_KEY)) return
+  } catch {
+    // Storage blocked. Falling through costs one wasted open per launch; the
+    // delete below is what actually stops this happening twice.
+  }
+
+  let legacy
+  try {
+    // Version-less, so this reads whatever is there and never creates the
+    // stores itself — an empty database and a real one have to be told apart.
+    legacy = await new Promise((resolve, reject) => {
+      const open = indexedDB.open(LEGACY_DB)
+      open.onsuccess = () => resolve(open.result)
+      open.onerror = () => reject(open.error ?? new Error('IndexedDB could not be opened'))
+      open.onblocked = () => reject(new Error('Close Hisaab in your other tabs and try again.'))
+    })
+  } catch {
+    return
+  }
+
+  try {
+    const names = [...legacy.objectStoreNames].filter((n) => STORES.includes(n))
+    const carried = []
+    if (names.length) {
+      const tx = legacy.transaction(names, 'readonly')
+      const got = await Promise.all(names.map((n) => request(tx.objectStore(n).getAll())))
+      names.forEach((n, i) => carried.push([n, got[i] ?? []]))
+    }
+    legacy.close?.()
+
+    const rows = carried.filter(([, r]) => r.length > 0)
+    if (rows.length) {
+      const target = await openDatabase(dbNameFor(userId))
+      const tx = target.transaction(rows.map(([n]) => n), 'readwrite')
+      for (const [name, list] of rows) {
+        const store = tx.objectStore(name)
+        // Never overwrite: a row already in the destination is the newer one.
+        await Promise.all(list.map((row) => request(store.add(row)).catch(() => null)))
+      }
+      await new Promise((resolve, reject) => {
+        tx.oncomplete = resolve
+        tx.onerror = () => reject(tx.error ?? new Error('IndexedDB write failed'))
+        tx.onabort = () => reject(tx.error ?? new Error('IndexedDB write aborted'))
+      })
+      target.close?.()
+    }
+  } catch {
+    // Half a copy is still safe — `add` skips what is already there, so a
+    // second attempt finishes the job. Leave the legacy database alone.
+    try {
+      legacy.close?.()
+    } catch {
+      // Already closed.
+    }
+    return
+  }
+
+  await forget(LEGACY_DB)
+  try {
+    localStorage.setItem(ADOPTED_KEY, userId)
+  } catch {
+    // The delete above is the real guard; this only saves the open next time.
+  }
+}
+
 /**
  * Newest first, exactly as PostgREST is asked to order in the Supabase backend:
  * txn_date desc, created_at desc, id desc. The third key is what stops a page
@@ -77,7 +187,11 @@ const byNewest = (a, b) =>
   String(b.created_at ?? '').localeCompare(String(a.created_at ?? '')) ||
   String(b.id ?? '').localeCompare(String(a.id ?? ''))
 
-export function localBackend() {
+/**
+ * @param userId the signed-in Hisaab user. Required in the app — see dbNameFor.
+ *               Omitted only by a test that wants a database of its own.
+ */
+export function localBackend(userId) {
   let db = null
   /** @type {Map<string, Map<string, object>>} table -> id -> row */
   const cache = new Map()
@@ -86,7 +200,8 @@ export function localBackend() {
   async function load() {
     if (loaded) return loaded
     loaded = (async () => {
-      db = await openDatabase()
+      await adoptLegacy(userId)
+      db = await openDatabase(dbNameFor(userId))
       await requestPersistence()
       const tx = db.transaction(STORES, 'readonly')
       const rows = await Promise.all(STORES.map((s) => request(tx.objectStore(s).getAll())))

@@ -2,11 +2,12 @@ import { useEffect, useMemo, useState } from 'react'
 import {
   listTemplates, listTransactions, postTemplate, removeTemplate, saveTemplate, templatesSupported,
 } from '../lib/db'
-import { money, today, dayLabel } from '../lib/format'
+import { money, today, dayLabel, endOfMonth, startOfMonth } from '../lib/format'
 import { TYPE_OPTIONS, DIRECTIONS, COUNTED } from '../lib/categories'
 import { findFrequent, FREQUENT_WINDOW } from '../lib/recurring'
 import {
-  WEEKDAYS, addDays, committedPerMonth, describeRule, nextDue, pendingOccurrences, ruleProblem,
+  WEEKDAYS, addDays, committedBetween, committedPerMonth, describeRule, nextDue,
+  pendingOccurrences, ruleProblem,
 } from '../lib/schedule'
 import { seedFromTemplate, templateFromSuggestion } from '../lib/entry'
 import ManualEntry from '../components/ManualEntry.jsx'
@@ -172,6 +173,13 @@ export default function Repeats({ onBack, onChange }) {
       suggestions,
       dismissed: all.filter((t) => t.hidden),
       perMonth: committedPerMonth(bills),
+      // A different question from perMonth, and the one you plan against: that
+      // is what a bill costs averaged over its whole cadence, this is what is
+      // actually owed on dates inside THIS month. Windowed from the 1st, or a
+      // bill left unconfirmed since June puts June's and July's rent into a
+      // figure headed "spending left" — see committedBetween. The unconfirmed
+      // ones are already listed by date under "Due now".
+      rest: committedBetween(bills, endOfMonth(), { from: startOfMonth() }),
     }
   }, [templates, rows])
 
@@ -296,12 +304,20 @@ export default function Repeats({ onBack, onChange }) {
         </div>
       )}
 
-      {view.perMonth > 0 && (
+      {/* Bills, not rupees. Gated on perMonth, somebody whose repeats all have
+          no agreed amount — the maid, the sabzi bill, the vegetable man — saw no
+          card at all, which took "Due now" with it: the one count on this screen
+          that is about something needing to be done. */}
+      {view.due.length + view.upcoming.length > 0 && (
         <div className="brand" style={{ marginBottom: 14 }}>
           <p className="caption">Committed every month</p>
           <Amount value={view.perMonth} className="amount" />
           <hr />
           <div className="foot">
+            <div>
+              <span className="k">Spending left</span>
+              <b className="num">₹{money(view.rest.total)}</b>
+            </div>
             <div>
               <span className="k">Bills</span>
               <b className="num">{view.due.length + view.upcoming.length}</b>
@@ -311,6 +327,12 @@ export default function Repeats({ onBack, onChange }) {
               <b className="num">{view.due.length}</b>
             </div>
           </div>
+          {view.rest.unknown > 0 && (
+            <p className="muted" style={{ fontSize: 12, margin: '10px 0 0', lineHeight: 1.6 }}>
+              Plus {view.rest.unknown} due before the month is out with no set amount — they are
+              in neither figure, because guessing one is how a total stops being true.
+            </p>
+          )}
         </div>
       )}
 
@@ -329,17 +351,29 @@ export default function Repeats({ onBack, onChange }) {
                     <span className="nm">{t.label}</span>
                     <span className="num">{t.amount == null ? '—' : `₹${money(t.amount)}`}</span>
                   </div>
-                  {dates.map((on) => (
+                  {/* Only the oldest is actionable, and that is the data model
+                      showing through rather than a restriction on top of it: a
+                      template remembers one date, `last_posted_on`, and it only
+                      ever moves forward. So confirming August on a bill last
+                      seen in May would carry June and July past with it and they
+                      would leave this list unlogged and unmentioned. Three
+                      buttons that quietly meant "and the two above" were the
+                      wrong shape for that. Oldest first, one at a time. */}
+                  {dates.map((on, i) => (
                     <div className="budgetrow-foot" key={on} style={{ gap: 10 }}>
                       <span className="muted">{dayLabel(on)}</span>
-                      <span className="danger-actions" style={{ gap: 8 }}>
-                        <button className="linkish" disabled={busy} onClick={() => logOne(t, on)}>
-                          Log it
-                        </button>
-                        <button className="linkish quiet" disabled={busy} onClick={() => skipOne(t, on)}>
-                          Skip
-                        </button>
-                      </span>
+                      {i === 0 ? (
+                        <span className="danger-actions" style={{ gap: 8 }}>
+                          <button className="linkish" disabled={busy} onClick={() => logOne(t, on)}>
+                            Log it
+                          </button>
+                          <button className="linkish quiet" disabled={busy} onClick={() => skipOne(t, on)}>
+                            Skip
+                          </button>
+                        </span>
+                      ) : (
+                        <span className="muted" style={{ fontSize: 12.5 }}>then this one</span>
+                      )}
                     </div>
                   ))}
                   <div className="budgetrow-foot">
@@ -354,9 +388,10 @@ export default function Repeats({ onBack, onChange }) {
           </div>
           {view.due.some(({ dates }) => dates.length > 1) && (
             <p className="muted" style={{ fontSize: 12, margin: '8px 2px 0', lineHeight: 1.6 }}>
-              More than one date on a bill means it went unconfirmed for a while. Log the ones
-              that happened and skip the ones that didn&rsquo;t — six at a time at most, so a
-              forgotten repeat can never post a wall of rows.
+              More than one date on a bill means it went unconfirmed for a while. Oldest first,
+              one at a time — log the ones that happened and skip the ones that didn&rsquo;t, and
+              the next date appears as you go. Six at a time at most, so a forgotten repeat can
+              never post a wall of rows.
             </p>
           )}
         </>

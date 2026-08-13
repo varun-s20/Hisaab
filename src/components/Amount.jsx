@@ -23,7 +23,14 @@ export default function Amount({ value, className = '' }) {
     const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
     // Counting up from zero on first paint is the point; counting between two
     // unrelated figures on a refetch is noise. Only animate a real change.
-    if (reduced || start === target) return setShown(target)
+    //
+    // `document.hidden` belongs in the same test. A browser does not run
+    // requestAnimationFrame in a tab nobody is looking at, so a figure that
+    // changed while the app was in the background never reached its target —
+    // the headline read ₹250 with ₹349 in the line beneath it, both computed
+    // from the same rows. A number is not worth animating to a screen that is
+    // not on; it is worth being correct on.
+    if (reduced || start === target || document.hidden) return setShown(target)
 
     const t0 = performance.now()
     const tick = (now) => {
@@ -32,7 +39,12 @@ export default function Amount({ value, className = '' }) {
       if (p < 1) raf.current = requestAnimationFrame(tick)
     }
     raf.current = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(raf.current)
+    // Whatever the animation had reached, the figure is the figure. Cancelling
+    // without this leaves whichever frame happened to be last on screen.
+    return () => {
+      cancelAnimationFrame(raf.current)
+      setShown(target)
+    }
   }, [value])
 
   return (

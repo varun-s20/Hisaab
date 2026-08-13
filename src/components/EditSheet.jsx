@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { updateTransaction, deleteTransaction, listAccounts, listMethods } from '../lib/db'
 import { learn } from '../lib/categorise'
 import { TYPE_OPTIONS, DIRECTIONS, COUNTED } from '../lib/categories'
+import { NATURAL_DIRECTION } from '../lib/entry'
 import { today } from '../lib/format'
 import CategoryPicker from './CategoryPicker.jsx'
 import DateField from './DateField.jsx'
@@ -49,6 +50,21 @@ export default function EditSheet({ row, open, onClose, onSaved, onDeleted }) {
   const [showing, setShowing] = useState(open)
 
   const set = (k, v) => setD((p) => ({ ...p, [k]: v }))
+
+  /**
+   * The direction follows the type, the same as ManualEntry and the same as a
+   * bulk edit (lib/entry.js). This was the one write path in the app that did
+   * not do it, and the row it produced is wrong in three places at once:
+   * retyping a payment to `refund` and leaving it `debit` counts it in
+   * earnTotal as money in, keeps accountBalances taking the money out of the
+   * account, and paints the row red with a minus.
+   *
+   * Setting the direction yourself afterwards still wins — a refund onto a
+   * credit card really is money out of the card.
+   */
+  function setType(type) {
+    setD((p) => ({ ...p, type, direction: NATURAL_DIRECTION[type] ?? p.direction }))
+  }
 
   // Both sides come out of draftOf, same keys in the same order, so this is a
   // cheap compare. A retyped identical amount reads as changed ('20' against
@@ -179,7 +195,7 @@ export default function EditSheet({ row, open, onClose, onSaved, onDeleted }) {
         <CategoryPicker value={d.category} onChange={(c) => set('category', c)} />
 
         <div className="pair">
-          <Select label="Type" value={d.type} options={TYPE_OPTIONS} onChange={(v) => set('type', v)} />
+          <Select label="Type" value={d.type} options={TYPE_OPTIONS} onChange={setType} />
           {/* The rails the parser knows, plus whatever this ledger has
               actually used, plus anything you name yourself — three credit
               cards are three ways to pay and the built-in list only ever had

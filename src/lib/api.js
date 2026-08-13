@@ -1,4 +1,4 @@
-import { accessToken } from './auth'
+import { accessToken } from './auth.js'
 
 // Every call to our own /api/* goes through here, because both endpoints spend
 // the owner's Gemini quota and now require a signed-in caller (see api/_auth.js).

@@ -181,13 +181,17 @@ export function parseSpec(spec) {
  * can only read as "broken".
  */
 export async function callGemini({ apiKey, model = DEFAULT_MODEL, prompt, label = 'gemini' }) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`
   try {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), 9000)
     const r = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      // The key rides in a header, not in `?key=`. A URL is the part of a
+      // request that gets written down — proxy logs, error reporters, a
+      // browser's own network panel, any extension watching requests — and on
+      // the bring-your-own-key path that URL carries the user's own Google key.
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
         generationConfig: { temperature: 0, responseMimeType: 'application/json' },

@@ -186,11 +186,20 @@ export function supabaseBackend(client) {
      * caller, in JavaScript, where both backends run the same code.
      */
     listAllTransactions({ limit = 5000, columns } = {}) {
-      const projection = columns?.length ? columns.join(', ') : null
+      // Recomputed per attempt, not once. Built ahead of the call, the retry
+      // withToAccount makes after learning the column is missing re-sent the
+      // identical select and failed identically — so the very first balance read
+      // on a database that has not run db/migrate-accounts.sql surfaced a raw
+      // 42703 instead of the sentence naming the file to run. It was right on
+      // the second attempt, which is the worst way for it to be wrong.
+      const projection = () =>
+        columns?.length
+          ? columns.filter((c) => c !== 'to_account' || hasToAccount).join(', ')
+          : null
       return pageThrough(limit, (offset, size, cols) =>
         client
           .from('transactions')
-          .select(projection ?? cols)
+          .select(projection() ?? cols)
           .order('txn_date', { ascending: false })
           .order('created_at', { ascending: false })
           .order('id', { ascending: false })
@@ -235,11 +244,30 @@ export function supabaseBackend(client) {
       return out
     },
 
+    /**
+     * Chunked for the same 414 ceiling as the two above, which it used to be
+     * missing. Reachable two ways: undoing a statement import, which deletes by
+     * the ids the insert handed back and can be hundreds, and selecting a whole
+     * month in the Ledger to delete it — where the read limit is 2,000 rows, so
+     * a single `id=in.(…)` would be roughly eighty kilobytes of URL.
+     */
     async deleteTransactions(ids) {
       if (!ids?.length) return 0
-      const { error } = await client.from('transactions').delete().in('id', ids)
-      if (error) throw error
-      return ids.length
+      let gone = 0
+      for (let i = 0; i < ids.length; i += 100) {
+        // What was actually removed, not what was asked for. `ids.length` was a
+        // count of the request; RLS scopes the delete to the caller and a row
+        // already gone is not an error, so the two are not the same number — and
+        // it is the number the Import screen reports back as "Removed N rows".
+        const { data, error } = await client
+          .from('transactions')
+          .delete()
+          .in('id', ids.slice(i, i + 100))
+          .select('id')
+        if (error) throw error
+        gone += (data ?? []).length
+      }
+      return gone
     },
 
     async listNeedsReview() {

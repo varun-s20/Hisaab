@@ -1,4 +1,4 @@
-import { iso, today } from './format'
+import { iso, today } from './format.js'
 
 // Day / week / month / custom, plus stepping backwards and forwards through
 // them. All arithmetic is on local Date objects and returns ISO strings, so it

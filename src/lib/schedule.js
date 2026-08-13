@@ -186,7 +186,42 @@ export function isDue(t, now = today()) {
 }
 
 /**
- * Everything a template owes, oldest first, capped.
+ * Every date this template still owes on or before `to`, oldest first, capped.
+ *
+ * "Still owes" is measured from `last_posted_on`, so a bill confirmed on the 5th
+ * owes nothing else this month, and a bill nobody has confirmed since June owes
+ * June, July and August — three payments, not one.
+ *
+ * The horizon is an argument because two screens ask two different questions of
+ * the same walk: what is due *now* (a list to confirm) and what is due *before
+ * month end* (a figure to plan against).
+ *
+ * `from` narrows the walk to a window, and it moves the ANCHOR rather than
+ * filtering the result — which is the whole point of it. Filtering afterwards
+ * spends the cap on dates outside the window: a daily repeat anchored two years
+ * ago returns two hundred dates from 2024 and none from the month being asked
+ * about, so the figure comes back as zero with nothing on screen saying why.
+ */
+export function occurrencesDueBy(t, to, { from = null, cap = 200 } = {}) {
+  const out = []
+  if (!t?.rule) return out
+  const startsOn = DATE.test(t.starts_on ?? '') ? t.starts_on : (t.created_at ?? to).slice(0, 10)
+  let after = DATE.test(t.last_posted_on ?? '') ? t.last_posted_on : addDays(startsOn, -1)
+  if (DATE.test(from ?? '')) {
+    const floor = addDays(from, -1)
+    if (after < floor) after = floor
+  }
+  while (out.length < cap) {
+    const next = nextOccurrence(t.rule, startsOn, after)
+    if (!next || next > to) break
+    out.push(next)
+    after = next
+  }
+  return out
+}
+
+/**
+ * Everything a template owes as of today, oldest first, capped.
  *
  * A bill left unconfirmed for four months is four payments, not one — but it is
  * also very often a bill that stopped, so the cap keeps a forgotten yearly
@@ -194,17 +229,7 @@ export function isDue(t, now = today()) {
  * The screen says how many it is offering.
  */
 export function pendingOccurrences(t, now = today(), cap = 6) {
-  const out = []
-  if (!t?.rule) return out
-  const startsOn = DATE.test(t.starts_on ?? '') ? t.starts_on : (t.created_at ?? now).slice(0, 10)
-  let after = DATE.test(t.last_posted_on ?? '') ? t.last_posted_on : addDays(startsOn, -1)
-  while (out.length < cap) {
-    const next = nextOccurrence(t.rule, startsOn, after)
-    if (!next || next > now) break
-    out.push(next)
-    after = next
-  }
-  return out
+  return occurrencesDueBy(t, now, { cap })
 }
 
 /** Times a month this comes round, for "what am I committed to". A month is
@@ -216,10 +241,73 @@ export function occurrencesPerMonth(rule) {
   return per / rule.every
 }
 
-/** What a set of bills costs in a month. Skips anything already finished. */
+/**
+ * Money arriving is never a commitment, whichever direction the type implies.
+ * A salary set up as a repeat used to be counted as ₹80,000 a month owed.
+ */
+const NEVER_OWED = new Set(['income', 'refund', 'repaid'])
+const isOutgoing = (t) => t.direction !== 'credit' && !NEVER_OWED.has(t.type)
+
+/**
+ * What is still owed inside a window. `{ total, count, unknown, overdue }`.
+ *
+ * Not the same number as committedPerMonth, and the difference is the point:
+ * that one is an average over a whole cadence, this one counts actual dates in a
+ * window. Rent on the 5th is ₹18,000 of every month and ₹0 of the 6th onwards.
+ *
+ * `from` is what makes it a window rather than a running tally, and leaving it
+ * off is how this was wrong. The walk starts at `last_posted_on`, so a rent
+ * nobody had confirmed since May reported three rents — ₹54,000 — under a line
+ * that says "committed this month". Two of those belong to months that have
+ * already been and gone, were very probably already paid, and were already
+ * counted against *their* months' spending. Subtracting them from what is left
+ * of this month is the same rupee taken twice.
+ *
+ * The ones before the window are not dropped in silence either: `overdue`
+ * carries the count, and both screens already list them by name.
+ *
+ * Only expenses. Every "left this month" figure in this app is a budget minus
+ * spendTotal (lib/format.js), and spendTotal counts `expense` and nothing else —
+ * so an SIP or a move into an envelope subtracted from it would take money off a
+ * figure that never had it. A repeat with no type stated is spending, matching
+ * what a row with no type is treated as everywhere else.
+ *
+ * `unknown` is the bills that are genuinely due and have no agreed amount — the
+ * maid, the vegetable bill. They cannot be added up and they must not be
+ * silently dropped either, or the screen quietly understates the month and
+ * calls it certainty. The caller names them.
+ */
+export function committedBetween(templates, to, { from = null, cap = 200 } = {}) {
+  const out = { total: 0, count: 0, unknown: 0, overdue: 0 }
+  for (const t of templates ?? []) {
+    if (!t?.rule || t.hidden) continue
+    if ((t.type ?? 'expense') !== 'expense' || !isOutgoing(t)) continue
+    // Cheap: the walk stops at the window's first date, so this is one extra
+    // occurrence computed per bill, not a second pass over the schedule.
+    if (from && occurrencesDueBy(t, addDays(from, -1), { cap: 1 }).length > 0) out.overdue += 1
+    const dates = occurrencesDueBy(t, to, { from, cap })
+    if (dates.length === 0) continue
+    if (t.amount == null || t.amount === '') {
+      out.unknown += 1
+      continue
+    }
+    out.total += Number(t.amount) * dates.length
+    out.count += 1
+  }
+  return out
+}
+
+/**
+ * What a set of bills costs in a month. Skips anything already finished.
+ *
+ * Wider than committedBetween on purpose: this is the Repeats screen's headline
+ * for everything that goes out on a schedule, an SIP and an envelope transfer
+ * included, because on that screen they are the point. Money coming *in* is
+ * excluded from both — that is not a matter of scope, it is the wrong sign.
+ */
 export function committedPerMonth(templates, now = today()) {
   return templates.reduce((sum, t) => {
-    if (!t.rule || t.hidden || !t.amount) return sum
+    if (!t.rule || t.hidden || !t.amount || !isOutgoing(t)) return sum
     if (t.rule.until && t.rule.until < now) return sum
     return sum + Number(t.amount) * occurrencesPerMonth(t.rule)
   }, 0)

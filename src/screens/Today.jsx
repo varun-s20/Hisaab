@@ -6,10 +6,12 @@ import {
   saveTransactions, listTransactions, updateTransaction, deleteTransaction, listBudgets,
   listTemplates, postTemplate, TOTAL_BUDGET,
 } from '../lib/db'
-import { money, iso, today, dayLabel, timeLabel, spendTotal, startOfMonth, daysInMonth } from '../lib/format'
+import {
+  money, iso, today, dayLabel, timeLabel, spendTotal, startOfMonth, daysInMonth, endOfMonth,
+} from '../lib/format'
 import { TYPE_OPTIONS } from '../lib/categories'
 import { findFrequent, FREQUENT_WINDOW } from '../lib/recurring'
-import { isDue } from '../lib/schedule'
+import { committedBetween, isDue, pendingOccurrences } from '../lib/schedule'
 import { seedFromRow, seedFromTemplate, templateFromSuggestion } from '../lib/entry'
 import CategoryIcon from '../components/CategoryIcon.jsx'
 import CategoryPicker from '../components/CategoryPicker.jsx'
@@ -266,10 +268,39 @@ export default function Today({ onChange, reviewCount, goReview, goRepeats }) {
     return [...pinned, ...suggested].slice(0, MAX_TILES)
   }, [templates, rows])
 
-  /** Bills due today or overdue. Nothing posts itself — this is a list of
-   *  things to confirm, which is the whole difference between a reminder and
-   *  an app that invents transactions. */
-  const dueBills = useMemo(() => templates.filter((t) => t.rule && !t.hidden && isDue(t)), [templates])
+  /**
+   * Bills due today or overdue. Nothing posts itself — this is a list of things
+   * to confirm, which is the whole difference between a reminder and an app that
+   * invents transactions.
+   *
+   * Every pending date, not one per bill: a rent nobody has confirmed since June
+   * is three payments to deal with, and the strip's total said one. The Repeats
+   * screen has always listed them date by date, so the two disagreed about the
+   * same bills.
+   */
+  const dueBills = useMemo(
+    () =>
+      templates
+        .filter((t) => t.rule && !t.hidden && isDue(t))
+        .map((t) => ({ t, dates: pendingOccurrences(t) })),
+    [templates],
+  )
+
+  const dueTotal = dueBills.reduce((s, { t, dates }) => s + (Number(t.amount) || 0) * dates.length, 0)
+
+  /**
+   * What the rest of this month is already spoken for. Counted off the same
+   * templates the tiles and the due strip read, so it costs no query.
+   *
+   * Windowed to this month. Without the `from`, arrears from earlier months
+   * landed in a figure labelled "this month" and were then subtracted from what
+   * is left of it — see committedBetween. The overdue ones are named in the
+   * strip above rather than folded into the number.
+   */
+  const committed = useMemo(
+    () => committedBetween(templates, endOfMonth(), { from: startOfMonth() }),
+    [templates],
+  )
 
   async function tapTile(t) {
     // No agreed amount — the grocery run. Everything else is filled in and the
@@ -361,7 +392,18 @@ export default function Today({ onChange, reviewCount, goReview, goRepeats }) {
           <HeroSkeleton />
         )}
 
-        {budget && <BudgetLine limit={Number(budget.amount)} spent={d.month} daysLeft={d.daysLeft} />}
+        {/* Shown for a budget, for commitments, or for both. Either half alone
+            is still worth a line: a budget with no bills is what the app has
+            always shown, and bills with no budget still answer "what is left of
+            this month" better than nothing does. */}
+        {(budget || committed.total > 0 || committed.unknown > 0) && (
+          <MonthLine
+            limit={budget ? Number(budget.amount) : null}
+            spent={d.month}
+            daysLeft={d.daysLeft}
+            committed={committed}
+          />
+        )}
 
         {/* Renders nothing once it has been answered, or where the browser has
             already decided. */}
@@ -374,13 +416,11 @@ export default function Today({ onChange, reviewCount, goReview, goRepeats }) {
                 {dueBills.length} repeat{dueBills.length === 1 ? '' : 's'} due
               </span>
               <span className="meta">
-                {dueBills.slice(0, 3).map((b) => b.label).join(' · ')}
+                {dueBills.slice(0, 3).map(({ t }) => t.label).join(' · ')}
                 {dueBills.length > 3 && ` and ${dueBills.length - 3} more`}
               </span>
             </span>
-            <span className="amt num">
-              ₹{money(dueBills.reduce((s, b) => s + (Number(b.amount) || 0), 0))}
-            </span>
+            <span className="amt num">₹{money(dueTotal)}</span>
           </button>
         )}
 
@@ -529,13 +569,55 @@ export default function Today({ onChange, reviewCount, goReview, goRepeats }) {
   )
 }
 
-/** The only line on this screen that is about the future rather than the past.
- *  Shown only when a monthly budget exists — an empty progress bar is worse
- *  than no bar. */
-function BudgetLine({ limit, spent, daysLeft }) {
-  const left = limit - spent
+/**
+ * The only line on this screen that is about the future rather than the past.
+ *
+ * Two halves, either of which can be missing. The budget half is the bar and
+ * what is left of the month's limit. The committed half is what the repeats
+ * already claim of the days remaining — which is the difference between
+ * "₹40,000 left" and knowing that ₹28,649 of it is rent and the SIP.
+ *
+ * The per-day figure divides by the days remaining *including today*, because
+ * today is a day you can still spend on. It is the number people actually act
+ * on: nobody plans against ₹11,351, everybody understands ₹630.
+ *
+ * Everything here is about the month it names. Bills left unconfirmed from
+ * earlier months are counted by `committed.overdue` and not by `committed.total`
+ * — they are somebody else's month, and the strip above lists them by name.
+ *
+ * No bar without a limit — an empty progress bar is worse than no bar.
+ */
+function MonthLine({ limit, spent, daysLeft, committed }) {
+  const left = limit == null ? null : limit - spent
+  const over = left != null && left < 0
+  // Bills with no agreed amount are counted, never guessed at. Left out of the
+  // total silently, the line would read as certainty it has not got.
+  const unsure = committed.unknown > 0
+    ? ` · ${committed.unknown} more with no set amount`
+    : ''
+
+  // No budget: the commitments are the whole line, and there is nothing to
+  // measure them against without inventing a figure.
+  if (left == null) {
+    return (
+      <div className="budgetline">
+        <div className="budgetline-top">
+          <span>
+            <b className="num">₹{money(committed.total)}</b> committed this month
+          </span>
+          <span className="muted num">
+            {daysLeft} day{daysLeft === 1 ? '' : 's'} to go
+          </span>
+        </div>
+        {unsure && <p className="budgetline-foot muted">{committed.unknown} more with no set amount.</p>}
+      </div>
+    )
+  }
+
   const pct = Math.min(100, (spent / limit) * 100)
-  const over = left < 0
+  const free = left - committed.total
+  const perDay = free / (daysLeft + 1)
+
   return (
     <div className="budgetline">
       <div className="budgetline-top">
@@ -549,6 +631,28 @@ function BudgetLine({ limit, spent, daysLeft }) {
       <div className="budgetbar">
         <i style={{ width: `${pct}%`, background: over ? 'var(--negative)' : 'var(--forest-green)' }} />
       </div>
+      {committed.total > 0 && !over && (
+        <p className="budgetline-foot muted">
+          <span className="num">₹{money(committed.total)}</span> of that is committed
+          {free < 0 ? (
+            <> — <span className="num">₹{money(-free)}</span> more than is left</>
+          ) : (
+            <> — <b className="num">₹{money(perDay)}</b> a day free</>
+          )}
+          {unsure}
+        </p>
+      )}
+      {/* Over budget already, and still owing: the per-day figure would be a
+          negative number dressed up as an allowance. */}
+      {committed.total > 0 && over && (
+        <p className="budgetline-foot muted">
+          <span className="num">₹{money(committed.total)}</span> more is committed before the month is out
+          {unsure}
+        </p>
+      )}
+      {committed.total === 0 && unsure && (
+        <p className="budgetline-foot muted">{committed.unknown} bill{committed.unknown === 1 ? '' : 's'} due with no set amount.</p>
+      )}
     </div>
   )
 }
@@ -658,7 +762,13 @@ function Found({ result, reviewCount, goReview, onRetry }) {
 // Tap a row to fix its category on the spot — one tap, one picker, no modal.
 // Everything else about the row lives behind "Edit details", so the daily
 // action stays one gesture and the rare one is still reachable.
-export function Row({ r, onChange, showDate = false }) {
+//
+// In the Ledger the same row also has to be selectable, so the three selection
+// props are opt-in and Today passes none of them. While `selectable` is on, the
+// tap picks the row instead of opening the drawer — one gesture cannot mean two
+// things, and a drawer left open under a selection is a second Edit button
+// beside the bulk one.
+export function Row({ r, onChange, showDate = false, selectable = false, selected = false, onToggle }) {
   const [open, setOpen] = useState(false)
   const [editing, setEditing] = useState(false)
   // The add form lives on the row rather than on the screen, exactly as
@@ -676,13 +786,24 @@ export function Row({ r, onChange, showDate = false }) {
     .filter(Boolean)
     .join(' · ')
 
+  // Leaving selection mode with a drawer already open would drop a picker and
+  // two buttons back into a list someone is halfway through selecting.
+  const expanded = open && !selectable
+
   return (
     <li>
       <button
-        className={`row ${r.needs_review ? 'flagged' : ''}`}
-        aria-expanded={open}
-        onClick={() => setOpen((o) => !o)}
+        className={`row${r.needs_review ? ' flagged' : ''}${selectable ? ' picking' : ''}${selected ? ' picked' : ''}`}
+        {...(selectable ? { 'aria-pressed': selected } : { 'aria-expanded': expanded })}
+        onClick={() => (selectable ? onToggle?.(r.id) : setOpen((o) => !o))}
       >
+        {selectable && (
+          <span className="pick" data-on={selected} aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+              <path d="m5 12.5 4.5 4.5L19 7.5" />
+            </svg>
+          </span>
+        )}
         <CategoryIcon category={r.category} />
         <span className="who">
           <span className="name">{r.payee_clean || r.payee_raw}</span>
@@ -700,7 +821,7 @@ export function Row({ r, onChange, showDate = false }) {
           read aloud — thirty rows is ninety of them. `inert` takes the subtree
           out of both the tab order and the accessibility tree, so aria-hidden
           on top of it would be redundant. */}
-      <div className="reveal" data-open={open} inert={!open}>
+      <div className="reveal" data-open={expanded} inert={!expanded}>
         <div>
           <QuickEdit
             r={r}

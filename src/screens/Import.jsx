@@ -109,7 +109,11 @@ export default function Import({ onChange, onBack }) {
       onChange?.()
       persistAILearnings(categorised).catch(() => {}) // never block on this
     } catch (err) {
-      setError(`Import stopped. ${err.message} Nothing was written.`)
+      // Not "nothing was written", which was never guaranteed: insertRows halves
+      // the batch on a row-level rejection, so some of it can be in the ledger
+      // before the throw. Re-importing the same file is safe — dedup catches
+      // whatever landed — and that is the honest instruction.
+      setError(`Import stopped. ${err.message} Some rows may already be in — importing the file again will skip those.`)
     } finally {
       setBusy(false)
     }
@@ -126,9 +130,11 @@ export default function Import({ onChange, onBack }) {
     if (ids.length === 0) return
     setBusy(true)
     try {
-      await deleteTransactions(ids)
+      // What came back, not what went out: a row already deleted from the ledger
+      // by hand is not an error and is not a row this undo removed.
+      const gone = await deleteTransactions(ids)
       setResult(null)
-      setUndone(ids.length)
+      setUndone(gone)
       onChange?.()
     } catch (err) {
       setError(`Couldn’t undo. ${err.message} The rows are still in the ledger.`)
@@ -277,7 +283,9 @@ export default function Import({ onChange, onBack }) {
         <button className="btn ghost" disabled={saving} onClick={dump}>
           {saving ? 'Building the file…' : 'Export everything'}
         </button>
-        {dumped && <p className="muted">{plural(dumped, 'row', 'rows')} exported.</p>}
+        {/* `> 0`, not truthiness: `{0 && …}` renders the zero, so a bare "0"
+            sat under this button from the moment the screen opened. */}
+        {dumped > 0 && <p className="muted">{plural(dumped, 'row', 'rows')} exported.</p>}
       </div>
     </div>
   )

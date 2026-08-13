@@ -96,7 +96,9 @@ async function signInToByo(client, config, userId) {
  * on if it cannot be reached — the settings screen shows the message.
  */
 export async function createBackend(config, userId) {
-  if (config?.kind === 'local') return localBackend()
+  // The user id is what names the database. A device is not a person, and two
+  // people on one phone must not open the same ledger — see local.js.
+  if (config?.kind === 'local') return localBackend(userId)
 
   if (config?.kind === 'byo') {
     if (!userId) throw new Error('Sign in first.')

@@ -20,17 +20,27 @@ const toFile = ({ name, type, data, lastModified }) => {
 export async function takeSharedFiles() {
   if (!new URLSearchParams(location.search).has('shared')) return []
 
+  /** The flag has done its job the moment we have looked. */
+  const clearFlag = () => history.replaceState(history.state, '', location.pathname)
+
   try {
     const cache = await caches.open(SHARE_CACHE)
     const res = await cache.match(SHARE_KEY)
-    if (!res) return []
+    // Nothing parked — a share whose cache write failed, or a reload of a URL
+    // that was already consumed. The flag still has to go, or it sits in the
+    // address bar for the rest of the session and every reload re-checks a
+    // cache entry that is never coming.
+    if (!res) {
+      clearFlag()
+      return []
+    }
     const items = await res.json()
     await cache.delete(SHARE_KEY)
     // The flag comes off only once the entry is read and gone, so the two can't
     // disagree. Stripping it first meant a read that threw — or a tab that died
     // mid-flight — left the screenshots parked in the cache with nothing left
     // pointing at them. App's own replaceState keeps whatever URL it finds.
-    history.replaceState(history.state, '', location.pathname)
+    clearFlag()
     return Array.isArray(items) ? items.map(toFile) : []
   } catch {
     return [] // A share that can't be read is a normal cold start, not an error.

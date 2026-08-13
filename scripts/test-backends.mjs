@@ -33,9 +33,23 @@ function installFakeIndexedDB() {
     return req
   }
 
+  const fail = (req, error) => {
+    queueMicrotask(() => {
+      req.error = error
+      req.onerror?.()
+    })
+    return req
+  }
+
   const makeStore = (rows) => ({
     getAll: () => settle({}, [...rows.values()]),
     put: (row) => settle({}, (rows.set(row.id, structuredClone(row)), row.id)),
+    // `add` refuses an existing key, which is what makes the legacy adoption in
+    // lib/backends/local.js safe to run twice.
+    add: (row) =>
+      rows.has(row.id)
+        ? fail({}, new Error('ConstraintError'))
+        : settle({}, (rows.set(row.id, structuredClone(row)), row.id)),
     delete: (id) => settle({}, (rows.delete(id), undefined)),
   })
 
@@ -47,8 +61,13 @@ function installFakeIndexedDB() {
       const stores = databases.get(name)
 
       const db = {
-        objectStoreNames: { contains: (s) => stores.has(s) },
+        // Array-like AND iterable, as the real DOMStringList is — local.js
+        // spreads it to find out what a legacy database actually holds.
+        get objectStoreNames() {
+          return Object.assign([...stores.keys()], { contains: (s) => stores.has(s) })
+        },
         createObjectStore: (s) => stores.set(s, new Map()),
+        close: () => {},
         transaction(names) {
           const list = Array.isArray(names) ? names : [names]
           const tx = { objectStore: (n) => makeStore(stores.get(n)) }
@@ -66,15 +85,33 @@ function installFakeIndexedDB() {
       })
       return req
     },
+    deleteDatabase(name) {
+      return settle({}, (databases.delete(name), undefined))
+    },
   }
 
-  return () => databases.clear()
+  return {
+    reset: () => databases.clear(),
+    /** What is actually on disk, for the assertions about which database a row
+     *  landed in. */
+    peek: (name, store) => [...(databases.get(name)?.get(store)?.values() ?? [])],
+    names: () => [...databases.keys()],
+    seed: (name, store, rows) => {
+      if (!databases.has(name)) databases.set(name, new Map())
+      const stores = databases.get(name)
+      if (!stores.has(store)) stores.set(store, new Map())
+      for (const row of rows) stores.get(store).set(row.id, structuredClone(row))
+    },
+  }
 }
 
-const resetStorage = installFakeIndexedDB()
+const storage = installFakeIndexedDB()
+const resetStorage = storage.reset
 
 const { localBackend } = await import('../src/lib/backends/local.js')
 const db = await import('../src/lib/db.js')
+const { bulkPatch } = await import('../src/lib/entry.js')
+const { supabaseBackend } = await import('../src/lib/backends/supabase.js')
 
 // ── Fixtures ───────────────────────────────────────────────────────────────
 
@@ -113,6 +150,80 @@ async function check(name, fn) {
 }
 
 console.log('\nlocal backend + shared computation\n')
+
+// ── Whose device is it ─────────────────────────────────────────────────────
+//
+// "This device" is the one backend with no server enforcing whose row is
+// whose, so the database name is the whole of the separation. It used to be
+// the single string 'hisaab': a second person signing in on the same phone and
+// choosing this mode opened the first person's ledger — and could then carry it
+// into their own cloud account with one tap of "move to Hisaab cloud".
+
+const A = 'aaaaaaaa-2222-4333-8444-555555555555'
+const B = 'bbbbbbbb-2222-4333-8444-555555555555'
+
+await check('two people on one device do not share a ledger', async () => {
+  resetStorage()
+  const mine = localBackend(A)
+  await mine.insertTransactions([{ ...txn({ payee_raw: 'MY CHEMIST' }), id: 'row-a' }])
+
+  const theirs = localBackend(B)
+  const rows = await theirs.listAllTransactions({})
+  assert.deepEqual(rows, [], 'the second account must open an empty ledger')
+
+  // And the first account still has it — a namespace, not a wipe.
+  assert.equal((await mine.listAllTransactions({})).length, 1)
+  assert.deepEqual(storage.peek(`hisaab.${A}`, 'transactions').map((r) => r.id), ['row-a'])
+})
+
+await check('every store is separated, not only transactions', async () => {
+  resetStorage()
+  const mine = localBackend(A)
+  await mine.upsertMerchantMapping({ payee_pattern: 'MYTHERAPIST', payee_clean: 'Dr S', category: 'Health' })
+  await mine.upsertBudget({ category: '*', amount: 20000 })
+  await mine.upsertTemplate({ label: 'Rent', payee: 'Landlord', amount: 15000 })
+  await mine.upsertCategory({ name: 'Therapy', color: '#fff', icon: 'other' })
+
+  const theirs = localBackend(B)
+  assert.deepEqual(await theirs.listMerchantMap(), [])
+  assert.deepEqual(await theirs.listBudgets(), [])
+  assert.deepEqual(await theirs.listTemplates(), [])
+  assert.deepEqual(await theirs.listCategories(), [])
+})
+
+await check('a ledger written before this change is carried over, once', async () => {
+  resetStorage()
+  // What an existing "This device" user has on disk: the unnamespaced database.
+  storage.seed('hisaab', 'transactions', [{ ...txn({ payee_raw: 'OLD ROW' }), id: 'legacy-1' }])
+  storage.seed('hisaab', 'budgets', [{ id: 'b1', scope: 'category', category: '*', amount: 9000 }])
+
+  const mine = localBackend(A)
+  const rows = await mine.listAllTransactions({})
+  assert.equal(rows.length, 1, 'the ledger must not vanish under a rename')
+  assert.equal(rows[0].payee_raw, 'OLD ROW')
+  assert.equal((await mine.listBudgets())[0].amount, 9000, 'every store comes across')
+
+  // Taken away, so the next account to sign in on this device cannot inherit it.
+  assert.ok(!storage.names().includes('hisaab'), 'the legacy database must be gone')
+  const theirs = localBackend(B)
+  assert.deepEqual(await theirs.listAllTransactions({}), [])
+})
+
+await check('adoption does not run twice or overwrite what is already there', async () => {
+  resetStorage()
+  storage.seed('hisaab', 'transactions', [{ ...txn({ payee_raw: 'OLD ROW' }), id: 'legacy-1' }])
+
+  const first = localBackend(A)
+  await first.listAllTransactions({})
+  await first.updateTransactions(['legacy-1'], { category: 'Health' })
+
+  // A second open of the same account: the legacy database is gone, so there is
+  // nothing to re-copy, and the edit above survives.
+  const again = localBackend(A)
+  const rows = await again.listAllTransactions({})
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].category, 'Health', 'a re-run must not restore the old copy over the edit')
+})
 
 // ── Writing and dedup ──────────────────────────────────────────────────────
 
@@ -756,6 +867,15 @@ await check('a self-hosted instance over http is refused unless it is loopback',
   assert.equal(urlProblem('http://localhost:54321'), null)
 })
 
+await check('a host the browser will not let us reach is refused here, not later', async () => {
+  // connect-src in index.html allows supabase.co and loopback. A custom domain
+  // passed this check, connected "successfully", and then failed on the first
+  // real request with an error that reads as the project being down.
+  assert.match(urlProblem('https://db.mycompany.com'), /supabase\.co/)
+  assert.equal(urlProblem('https://abcdefgh.supabase.co'), null)
+  assert.equal(urlProblem('http://127.0.0.1:54321'), null)
+})
+
 // ── The credential Hisaab keeps in their project ───────────────────────────
 
 const UID = '11111111-2222-4333-8444-555555555555'
@@ -1007,6 +1127,192 @@ await check('deleting the last row naming an account retires the account', async
 
   await db.deleteTransaction(rows.find((r) => r.txn_ref === 'stays').id)
   assert.deepEqual(await db.listAccounts(), [])
+})
+
+// ── Editing many rows at once ──────────────────────────────────────────────
+//
+// The Ledger can select a month of rows and recategorise the lot. One call, one
+// round trip — and one place where the derived account and method lists have to
+// be dropped, or the pickers keep offering a bank nothing is filed under any
+// more.
+
+// ── The Supabase backend's URL ceiling ─────────────────────────────────────
+//
+// PostgREST takes `id=in.(…)` in the query string, and a UUID is 36 characters.
+// A few hundred of them is a URL long enough to be answered 414 instead of
+// obeyed. findExistingRefs and updateTransactions both chunk for this; delete
+// did not, and it is reachable with a whole month selected in the Ledger or by
+// undoing a statement import.
+
+function recordingClient({ vanished = [] } = {}) {
+  const calls = []
+  const settled = (value) => ({ then: (resolve) => resolve(value) })
+  const gone = new Set(vanished)
+  const client = {
+    from() {
+      const state = { ids: [] }
+      const builder = {
+        delete() {
+          state.op = 'delete'
+          return builder
+        },
+        update(patch) {
+          state.op = 'update'
+          state.patch = patch
+          return builder
+        },
+        in(col, values) {
+          state.ids = values
+          calls.push({ op: state.op, count: values.length })
+          return Object.assign(settled({ data: [], error: null }), builder)
+        },
+        // PostgREST answers a delete carrying `select` with the rows it actually
+        // removed — which is not the same list as the one asked for: RLS scopes
+        // the statement to the caller, and a row already gone matches nothing
+        // and is not an error.
+        select: () =>
+          settled({ data: state.ids.filter((id) => !gone.has(id)).map((id) => ({ id })), error: null }),
+      }
+      return builder
+    },
+  }
+  return { calls, client }
+}
+
+await check('deleting a month of rows is chunked below the URL ceiling', async () => {
+  const { calls, client } = recordingClient()
+  const ids = Array.from({ length: 250 }, (_, i) => `id-${i}`)
+  const n = await supabaseBackend(client).deleteTransactions(ids)
+
+  assert.equal(n, 250, 'every id has to be reported as dealt with')
+  assert.ok(calls.length > 1, 'a single request would be the 414')
+  assert.equal(calls.reduce((s, c) => s + c.count, 0), 250, 'and every id has to be sent')
+  for (const c of calls) assert.ok(c.count <= 100, `chunk of ${c.count} is over the ceiling`)
+})
+
+await check('a delete reports what went, not what was asked for', async () => {
+  // Undoing an import says "Removed N rows". Counting the request rather than
+  // the answer, N was the size of the batch — including rows somebody had
+  // already deleted by hand, which this undo did not remove.
+  const ids = Array.from({ length: 250 }, (_, i) => `id-${i}`)
+  const { client } = recordingClient({ vanished: ['id-3', 'id-7', 'id-180'] })
+  assert.equal(await supabaseBackend(client).deleteTransactions(ids), 247)
+})
+
+await check('editing a month of rows is chunked the same way', async () => {
+  const { calls, client } = recordingClient()
+  const ids = Array.from({ length: 250 }, (_, i) => `id-${i}`)
+  await supabaseBackend(client).updateTransactions(ids, { category: 'Eating out' })
+  assert.equal(calls.reduce((s, c) => s + c.count, 0), 250)
+  for (const c of calls) assert.ok(c.count <= 100)
+})
+
+await check('nothing selected sends no request at all', async () => {
+  const { calls, client } = recordingClient()
+  const backend = supabaseBackend(client)
+  assert.equal(await backend.deleteTransactions([]), 0)
+  assert.deepEqual(await backend.updateTransactions([], { category: 'x' }), [])
+  assert.equal(calls.length, 0)
+})
+
+await check('a bulk patch carries only the fields that were set', () => {
+  assert.deepEqual(bulkPatch({ category: '', type: '', direction: '', method: '', account: '' }), {})
+  assert.deepEqual(bulkPatch({ account: 'SBI' }), { account: 'SBI' })
+})
+
+await check('setting a kind of payment sets its direction with it', () => {
+  // The trap this exists to close: retyping ten rows as refunds and leaving
+  // them `debit`. spendTotal would stop counting them, accountBalances would
+  // keep taking the money OUT of the account, and the row would still render
+  // with a minus. Wrong in three places, flagged in none.
+  assert.deepEqual(bulkPatch({ type: 'refund' }), {
+    type: 'refund',
+    direction: 'credit',
+    to_account: null,
+  })
+  assert.deepEqual(bulkPatch({ type: 'income' }), {
+    type: 'income',
+    direction: 'credit',
+    to_account: null,
+  })
+  assert.deepEqual(bulkPatch({ type: 'expense' }), {
+    type: 'expense',
+    direction: 'debit',
+    to_account: null,
+  })
+})
+
+await check('a direction set by hand outranks the one the type implies', () => {
+  // A refund onto a credit card really is money out of the card. Setting both
+  // has to mean both.
+  assert.deepEqual(bulkPatch({ type: 'refund', direction: 'debit' }), {
+    type: 'refund',
+    direction: 'debit',
+    to_account: null,
+  })
+})
+
+await check('a row that stops being a transfer loses its destination', () => {
+  // accountBalances only reads to_account on a transfer, so a stale one is
+  // inert — right up until someone types the row back to a transfer and an
+  // envelope is credited by a payment that no longer goes there.
+  assert.deepEqual(bulkPatch({ type: 'expense' }).to_account, null)
+  assert.equal('to_account' in bulkPatch({ type: 'transfer' }), false)
+  assert.equal('to_account' in bulkPatch({ account: 'SBI' }), false)
+})
+
+await check('choosing a category by hand is not a guess to be reviewed', () => {
+  assert.equal(bulkPatch({ category: 'Eating out' }).needs_review, false)
+  assert.equal('needs_review' in bulkPatch({ account: 'SBI' }), false)
+})
+
+await check('one patch reaches every row it names and no others', async () => {
+  await fresh()
+  const { rows } = await db.saveTransactions([
+    txn({ payee_raw: 'SWIGGY', txn_ref: 'a', amount: 400, category: 'Other' }),
+    txn({ payee_raw: 'SWIGGY', txn_ref: 'b', amount: 520, category: 'Other' }),
+    txn({ payee_raw: 'BLINKIT', txn_ref: 'c', amount: 900, category: 'Other' }),
+  ])
+  const swiggy = rows.filter((r) => r.payee_raw === 'SWIGGY').map((r) => r.id)
+
+  const updated = await db.updateTransactions(swiggy, { category: 'Eating out' })
+  assert.equal(updated.length, 2)
+
+  const after = await db.listTransactions({})
+  const byRef = Object.fromEntries(after.map((r) => [r.txn_ref, r.category]))
+  assert.deepEqual(byRef, { a: 'Eating out', b: 'Eating out', c: 'Other' })
+})
+
+await check('a bulk edit clears the account and method lists it invalidated', async () => {
+  await fresh()
+  const { rows } = await db.saveTransactions([
+    txn({ payee_raw: 'ONE', txn_ref: 'one', account: 'HDFC card', method: 'card' }),
+    txn({ payee_raw: 'TWO', txn_ref: 'two', account: 'HDFC card', method: 'card' }),
+  ])
+  // Read first, so the caches are warm and a stale answer is possible.
+  assert.deepEqual(await db.listAccounts(), ['HDFC card'])
+  assert.deepEqual(await db.listMethods(), ['card'])
+
+  await db.updateTransactions(rows.map((r) => r.id), { account: 'SBI', method: 'gpay' })
+  assert.deepEqual(await db.listAccounts(), ['SBI'])
+  assert.deepEqual(await db.listMethods(), ['gpay'])
+})
+
+await check('selecting nothing writes nothing', async () => {
+  await fresh()
+  await db.saveTransactions([txn({ payee_raw: 'SWIGGY', category: 'Other' })])
+  assert.deepEqual(await db.updateTransactions([], { category: 'Eating out' }), [])
+  const [row] = await db.listTransactions({})
+  assert.equal(row.category, 'Other', 'an empty selection must not touch the ledger')
+})
+
+await check('editing one row still goes through the same path', async () => {
+  await fresh()
+  const { rows } = await db.saveTransactions([txn({ payee_raw: 'SWIGGY', account: 'HDFC card' })])
+  assert.deepEqual(await db.listAccounts(), ['HDFC card'])
+  const row = await db.updateTransaction(rows[0].id, { account: 'SBI' })
+  assert.equal(row.account, 'SBI')
+  assert.deepEqual(await db.listAccounts(), ['SBI'])
 })
 
 await check('a bill with no agreed amount does not advance on an empty write', async () => {

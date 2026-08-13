@@ -188,11 +188,16 @@ export default function App() {
       setTab(open)
       history.replaceState({ tab: open }, '', location.pathname)
     }
+    // A reminder tapped while the app is already open. The history entry has to
+    // move with the screen, exactly as the ?open= branch above does it: left
+    // behind, the top of the stack still named the tab the user was on before,
+    // so the first Back press after opening a reminder went nowhere visible.
     const onMessage = (e) => {
       const next = e.data?.type === 'hisaab-open' ? e.data.tab : null
-      if (!next) return
+      if (!next || (!TABS.some(([id]) => id === next) && !SUB.includes(next))) return
       current.current = next
       setTab(next)
+      history.replaceState({ tab: next }, '')
     }
     navigator.serviceWorker?.addEventListener('message', onMessage)
     return () => navigator.serviceWorker?.removeEventListener('message', onMessage)
@@ -245,11 +250,27 @@ export default function App() {
 // Light is the design; dark is the same tokens for anyone who logs at 1am with
 // the lights off. Applied to <html> so the CSS is a single attribute swap.
 function ThemeToggle() {
-  const [dark, setDark] = useState(() => localStorage.getItem('theme') === 'dark')
+  // Guarded, the same as every other localStorage read in this app (lib/ai.js,
+  // lib/categories.js, lib/entry.js) and unlike how this one used to be. A
+  // browser with storage blocked — Safari in private mode, third-party cookies
+  // off in an installed PWA — throws on the read, and throwing inside a useState
+  // initialiser takes down the whole tree. A preference nobody can save is worth
+  // a default; it is not worth a white screen where the More screen was.
+  const [dark, setDark] = useState(() => {
+    try {
+      return localStorage.getItem('theme') === 'dark'
+    } catch {
+      return false
+    }
+  })
 
   useEffect(() => {
     document.documentElement.dataset.theme = dark ? 'dark' : 'light'
-    localStorage.setItem('theme', dark ? 'dark' : 'light')
+    try {
+      localStorage.setItem('theme', dark ? 'dark' : 'light')
+    } catch {
+      // The theme still applies for this session; only remembering it is lost.
+    }
     document.querySelector('meta[name="theme-color"]')?.setAttribute('content', dark ? '#121511' : '#F1F1ED')
   }, [dark])
 

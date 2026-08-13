@@ -8,6 +8,7 @@ import {
   isPersonal, detectApp, synthRef, parseScreenshot,
 } from '../src/lib/parse.js'
 import { seedLookup } from '../src/lib/seeds.js'
+import { suggestCategory } from '../src/lib/categorise.js'
 import { sanitise, guess, uncategorisedNote, applySpec, group } from '../src/lib/query.js'
 
 const NOW = new Date(2026, 7, 11) // 11 Aug 2026
@@ -266,6 +267,42 @@ check('a brand that reads like a person is still a brand', () => {
   assert.equal(isPersonal('Swiggy Diners'), true)
   assert.equal(seedLookup('Swiggy Diners'), 'Food & Dining')
   assert.equal(seedLookup('Mohammad Amaan'), null)
+})
+
+check('a premium and an instalment are spending, not money moving', () => {
+  // Both used to seed to 'Transfers', which types the row `transfer`, which is
+  // in no total on any screen. So an LIC premium and a car EMI left the account
+  // every month and appeared in nobody's spending — the two largest fixed costs
+  // most people have, invisible.
+  assert.equal(seedLookup('LIC OF INDIA'), 'Bills & Utilities')
+  assert.equal(seedLookup('HDFC Ergo Insurance'), 'Bills & Utilities')
+  assert.equal(seedLookup('Loan EMI'), 'Bills & Utilities')
+  // …and LIC is anchored, so it does not swallow the words it is a substring of.
+  assert.equal(seedLookup('Public Works Dept'), null)
+  assert.equal(seedLookup('Policy Renewal Co'), null)
+
+  // The brokers stay where they were, and on purpose: an SIP is your own money
+  // changing pockets, and nothing in a payee string tells a ₹5,000 purchase
+  // from a ₹5,000 redemption. `investment` is set by hand.
+  assert.equal(seedLookup('Groww'), 'Transfers')
+  assert.equal(seedLookup('SIP Mutual Fund'), 'Transfers')
+  assert.equal(seedLookup('CRED'), 'Transfers')
+})
+
+check('typing a merchant the app already knows fills the category in', () => {
+  // The add form used to save every typed row as 'Other' and put it in the
+  // Teach queue, where the app then offered the answer out of the very rules
+  // below — work it invented for itself while somebody was already typing.
+  assert.equal(suggestCategory('Swiggy'), 'Food & Dining')
+  assert.equal(suggestCategory('Chai Point'), 'Food & Dining')
+  assert.equal(suggestCategory('Uber'), 'Transport')
+  // A friend's name is a transfer, decided on this device and never sent.
+  assert.equal(suggestCategory('Mohammad Amaan'), 'Transfers')
+  // Nothing recognised is nothing suggested — the picker stays on "Pick one"
+  // rather than filing a stranger under a guess.
+  assert.equal(suggestCategory('Zzqq Traders 4471'), null)
+  assert.equal(suggestCategory(''), null)
+  assert.equal(suggestCategory(undefined), null)
 })
 
 check('two identical amounts on one day stay two rows', () => {

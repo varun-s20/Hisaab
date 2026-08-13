@@ -3,7 +3,7 @@ import {
   snapshotTransactions,
 } from './db.js'
 import { copyLedger } from './migrate.js'
-import { toCSV } from './csv.js'
+import { download as downloadCsv, toCSV } from './csv.js'
 import { today } from './format.js'
 
 // The exit door. The file format is in lib/csv.js; this is the part that has to
@@ -151,23 +151,14 @@ export async function readBackupFile(file) {
   }
 }
 
-/** Hand the file to the browser. Revoked on the next tick, not left to leak. */
-export function download(csv, name = `hisaab-${today()}.csv`) {
-  // ﻿: without the BOM, Excel on Windows reads the file as the system
-  // codepage and a merchant name in Devanagari — or a plain ₹ — comes out as
-  // mojibake. Every other reader ignores it.
-  const url = URL.createObjectURL(new Blob([`﻿${csv}`], { type: 'text/csv;charset=utf-8' }))
-  const a = document.createElement('a')
-  a.href = url
-  a.download = name
-  // In the document, not detached: Safari ignores a click on an anchor that
-  // was never in the tree, and this app is mostly opened on a phone.
-  a.style.display = 'none'
-  document.body.appendChild(a)
-  a.click()
-  a.remove()
-  setTimeout(() => URL.revokeObjectURL(url), 0)
-}
+/**
+ * Hand the file to the browser.
+ *
+ * Moved to lib/csv.js, beside the writer, because the Ledger exports a CSV too
+ * and importing this file for it would pull db.js and lib/migrate.js into the
+ * main bundle. Re-exported here so nothing that already called it had to change.
+ */
+export const download = (csv, name = `hisaab-${today()}.csv`) => downloadCsv(csv, name)
 
 /**
  * Save a backup file.

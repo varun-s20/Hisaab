@@ -1,7 +1,11 @@
-import { listMerchantMap, upsertMerchantMapping } from './db'
-import { categoriseMerchants } from './ai'
-import { isPersonal } from './parse'
-import { normalise, seedLookup, TYPE_FOR_CATEGORY } from './seeds'
+// Extensions are explicit here, as they are in lib/db.js and lib/query.js:
+// Vite resolves without them and plain node does not, and
+// `node scripts/test-parse.mjs` imports this file for suggestCategory.
+import { listMerchantMap, upsertMerchantMapping } from './db.js'
+import { categoriseMerchants } from './ai.js'
+import { allCategories } from './categories.js'
+import { isPersonal } from './parse.js'
+import { normalise, seedLookup, TYPE_FOR_CATEGORY } from './seeds.js'
 
 // The cascade, in order — stop at the first hit:
 //   1. merchant map      (Supabase, cached; a correction the user made outranks all)
@@ -42,6 +46,34 @@ export async function loadMerchantMap(force = false) {
 
 export function clearMapCache() {
   mapCache = null
+}
+
+/**
+ * What this app already knows a payee should be filed under, or null.
+ *
+ * The first three tiers of the cascade above, and only those three: a map hit,
+ * then the seed rules, then the personal check. Nothing here touches the
+ * network, so it is cheap enough to run on every keystroke of a payee field.
+ *
+ * It exists because the add form did not use any of it. Typing "Swiggy" saved a
+ * row as 'Other' and put it in the Teach queue — where the app then offered
+ * "Food & Dining", out of a rule that was in the bundle the whole time. Work
+ * the app invented for itself, on the screen where somebody is already typing.
+ *
+ * Returns a suggestion, never a decision. The caller fills the picker in and
+ * the person can overrule it, which is the difference between help and a guess
+ * written to the ledger.
+ */
+export function suggestCategory(payee) {
+  const key = normalise(payee)
+  if (!key) return null
+  const hit = mapCache?.get(key)
+  if (hit?.category) return hit.category
+  const seed = seedLookup(payee)
+  if (seed) return seed
+  // A friend's name is a transfer, and that judgement is made on this device
+  // and stays here — the same rule the cascade applies, at the same rank.
+  return isPersonal(payee) ? 'Transfers' : null
 }
 
 function typeFor(category, direction) {
@@ -119,7 +151,14 @@ export async function categoriseBatch(txns) {
 // Hisaab's quota, or the user's own Gemini key if they set one — lib/ai.js
 // decides. Fail soft either way: no result means the merchant stays unknown and
 // turns up in "Teach me", which is a worse guess and not a broken import.
-const askAI = (merchants) => categoriseMerchants(merchants)
+//
+// The category list rides along, which it did not use to. Categories somebody
+// invented live on the device and the server cannot know them, so leaving the
+// argument off meant allowedCategories() fell back to the fourteen built-ins and
+// parseCategorised snapped everything else to 'Other' — a category called
+// "Therapy" was pickable in Teach and unreachable from a screenshot or a
+// statement import, which is every row the app files on its own.
+const askAI = (merchants) => categoriseMerchants(merchants, allCategories())
 
 /**
  * Remember a categorisation. User corrections always outrank AI guesses.

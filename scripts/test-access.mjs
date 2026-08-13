@@ -202,6 +202,20 @@ await check('a spent token cannot be replayed', async () => {
   ROW.status = 'pending'
 })
 
+await check('without SITE_URL the row is recorded and nothing is mailed', async () => {
+  // The mail carries Approve / Reject links. With no SITE_URL to build them
+  // from, the base would fall back to the origin of the request that triggered
+  // the send — a Host header, chosen by whoever made the request — and the
+  // admin would be sent a link to somebody else's server with a live token on
+  // the end of it. Recording the ask is still right; mailing about it is not.
+  const bare = { ...env, SITE_URL: '' }
+  const request = ask('asker@example.com')
+  const r = await handleAccess(request, bare, new URL(request.url))
+  assert.equal(r.status, 200)
+  assert.ok(asked('access_requests'), 'the request itself must still be written down')
+  assert.equal(mails.length, 0, 'no mail may be built from a Host header')
+})
+
 await check('reject declines, mails, and creates no account', async () => {
   const t = await sign({ id: ROW.id, d: 'reject' }, env.APPROVE_SECRET, 3600)
   const page = await (await run(decideForm(t, 'reject'))).text()

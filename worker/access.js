@@ -74,7 +74,17 @@ const canRecord = (env) => Boolean(env.SUPABASE_URL && env.SUPABASE_SERVICE_ROLE
  * deploy mistake and a person who asked and vanished.
  */
 const canNotify = (env) =>
-  Boolean(env.APPROVE_SECRET && env.ADMIN_EMAIL && env.RESEND_API_KEY && env.MAIL_FROM)
+  Boolean(
+    env.APPROVE_SECRET && env.ADMIN_EMAIL && env.RESEND_API_KEY && env.MAIL_FROM &&
+    // SITE_URL is a security requirement here, not a nicety. The mail carries
+    // Approve / Reject links, and without this the base for them falls back to
+    // the origin of the request that triggered the send — which is the Host
+    // header, chosen by whoever made the request. A forged one sends the admin
+    // an email whose Approve link points at somebody else's server, and the
+    // signed token travels with the tap. Same value is handed to Supabase as
+    // the magic link's redirect_to.
+    env.SITE_URL,
+  )
 
 // ── The page the admin lands on ──────────────────────────────────────────
 //
@@ -518,6 +528,10 @@ async function decide(request, env, url, site) {
 export function handleAccess(request, env, url) {
   // Absolute, because these end up in emails. SITE_URL wins so the links point
   // at the real domain even when the Worker is reached on its workers.dev name.
+  //
+  // The fallback survives only for what this Worker renders itself — the decide
+  // page's own logo and styling. Nothing that leaves in an email is built from
+  // it: canNotify() above refuses to send at all without SITE_URL.
   const site = (env.SITE_URL || url.origin).replace(/\/$/, '')
 
   if (url.pathname === '/api/access-request') {

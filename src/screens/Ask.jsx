@@ -31,6 +31,11 @@ const EXAMPLES = [
   'Money received last 30 days',
 ]
 
+/** The most rows one answer is computed over. A question with no period in it
+ *  is "all time", which on a long ledger is more than this — so the figure has
+ *  to be able to say it is reading a window rather than everything. */
+const READ_LIMIT = 5000
+
 const GROUP_TITLE = {
   category: 'By category',
   merchant: 'By merchant',
@@ -66,13 +71,24 @@ export default function Ask({ onBack }) {
       // Hisaab's quota, or the user's own Gemini key if they set one. Same
       // prompt either way (shared/gemini.js), and either way what leaves is the
       // question plus names — never a transaction.
-      const raw = await askForFilter({
-        question: text,
-        today: new Date().toLocaleDateString('en-CA'), // local YYYY-MM-DD, not UTC
-        categories: allCategories(),
-        methods,
-        accounts,
-      })
+      //
+      // Guarded, and it was not: every ordinary failure inside askForFilter
+      // returns null, but reading the session can genuinely throw — and the only
+      // setBusy(false) was in the finally of the block below, so a throw here
+      // left the spinner turning for good with no error line and nothing to
+      // press. An unreachable assistant is exactly what the local reader is for.
+      let raw = null
+      try {
+        raw = await askForFilter({
+          question: text,
+          today: new Date().toLocaleDateString('en-CA'), // local YYYY-MM-DD, not UTC
+          categories: allCategories(),
+          methods,
+          accounts,
+        })
+      } catch {
+        // Left null: the fallback below is the answer.
+      }
       let spec = raw ? sanitise(raw, { methods, accounts }) : null
 
       if (!spec) {
@@ -89,7 +105,7 @@ export default function Ask({ onBack }) {
       try {
         // Only the validated date window reaches the database. Everything else
         // is applied in memory, so a malformed spec can never become a query.
-        const rows = await listTransactions({ from: spec.from, to: spec.to, limit: 5000 })
+        const rows = await listTransactions({ from: spec.from, to: spec.to, limit: READ_LIMIT })
         // Computed here, against the rows before the category filter took them
         // away — that count no longer exists once applySpec has run.
         setResult({
@@ -97,6 +113,11 @@ export default function Ask({ onBack }) {
           rows: applySpec(rows, spec),
           local,
           note: uncategorisedNote(spec, rows),
+          // Newest-first, so hitting the ceiling drops the OLDEST rows in the
+          // window and the total comes back confident and short. Said out loud
+          // rather than left as a number nobody can check — this is the one
+          // screen that answers a question with a single figure.
+          truncated: rows.length >= READ_LIMIT,
         })
       } catch (e) {
         setErr(e.message ?? String(e))
@@ -115,8 +136,14 @@ export default function Ask({ onBack }) {
     if (!result) return
     const { spec, local } = result
     try {
-      const rows = await listTransactions({ from: spec.from, to: spec.to, limit: 5000 })
-      setResult({ spec, rows: applySpec(rows, spec), local, note: uncategorisedNote(spec, rows) })
+      const rows = await listTransactions({ from: spec.from, to: spec.to, limit: READ_LIMIT })
+      setResult({
+        spec,
+        rows: applySpec(rows, spec),
+        local,
+        note: uncategorisedNote(spec, rows),
+        truncated: rows.length >= READ_LIMIT,
+      })
     } catch (e) {
       setErr(e.message ?? String(e))
     }
@@ -250,6 +277,14 @@ export default function Ask({ onBack }) {
           {result.local && (
             <p className="muted" style={{ fontSize: 12.5, margin: 0 }}>
               Read on this device — the assistant was unreachable, so this is a rough match.
+            </p>
+          )}
+
+          {result.truncated && (
+            <p className="muted" style={{ fontSize: 12.5, margin: 0 }}>
+              Read over your most recent {READ_LIMIT.toLocaleString('en-IN')} transactions, which
+              is as far back as one answer goes. Anything older than that is not in this figure —
+              name a month or a year to ask about it.
             </p>
           )}
 

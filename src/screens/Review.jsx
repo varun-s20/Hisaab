@@ -83,6 +83,14 @@ export default function Review({ onChange, onBack }) {
         category: d.category || null,
         type: d.type,
         direction: d.direction,
+        // Only a transfer has a destination, the same rule EditSheet,
+        // ManualEntry and a bulk edit all apply. This was the one write path
+        // that left it behind: a row typed `transfer` by the cascade carries a
+        // to_account, and confirming it here as an expense left that pointing at
+        // an envelope the payment no longer goes to — inert until somebody types
+        // the row back to a transfer, and then crediting a pocket for money that
+        // never arrived in it.
+        to_account: d.type === 'transfer' ? (t.to_account ?? null) : null,
         needs_review: false,
         confidence: 1.0,
         // The OCR dump is only kept while a row is in this queue — it is what

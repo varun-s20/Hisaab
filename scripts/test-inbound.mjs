@@ -5,7 +5,7 @@
 //   node scripts/test-inbound.mjs
 
 import assert from 'node:assert/strict'
-import { handleInbound, readDecision } from '../worker/inbound.js'
+import { defang, handleInbound, readDecision, sameMailbox } from '../worker/inbound.js'
 
 const SECRET_BYTES = Buffer.from('a'.repeat(32))
 const env = {
@@ -274,6 +274,59 @@ await check('somebody else replying to that address decides nothing', async () =
   assert.equal(r.status, 200)
   assert.equal(marked(), false, 'a From that is not the admin must not decide')
   assert.equal(mails().length, 0, 'and it is not forwarded either — it is not a message')
+})
+
+await check('a stranger wearing the admin address as a display name decides nothing', async () => {
+  // The check used to be `from.includes(ADMIN_EMAIL)`, and a display name is
+  // whatever the sender types. This is the whole attack.
+  reply('approve', { from: '"admin@example.com" <attacker@elsewhere.test>' })
+  const r = await post(EVENT, await sign(EVENT))
+  assert.equal(r.status, 200)
+  assert.equal(accountMade(), false, 'a forged display name must not create an account')
+  assert.equal(marked(), false)
+})
+
+await check('the admin writing from an alias still decides', async () => {
+  reply('approve', { from: 'The Admin <admin+phone@example.com>' })
+  await post(EVENT, await sign(EVENT))
+  assert.ok(accountMade(), 'a plus-tag is the same mailbox')
+})
+
+await check('an address is compared as an address, never as a substring', () => {
+  assert.equal(sameMailbox('admin@example.com', 'admin@example.com'), true)
+  assert.equal(sameMailbox('Hisaab Admin <ADMIN@example.com>', 'admin@example.com'), true)
+  assert.equal(sameMailbox('admin+bills@example.com', 'admin@example.com'), true)
+  // Every one of these passed the old substring test.
+  assert.equal(sameMailbox('"admin@example.com" <evil@elsewhere.test>', 'admin@example.com'), false)
+  assert.equal(sameMailbox('admin@example.com.evil.test', 'admin@example.com'), false)
+  assert.equal(sameMailbox('notadmin@example.com', 'admin@example.com'), false)
+  assert.equal(sameMailbox('', 'admin@example.com'), false)
+  assert.equal(sameMailbox(undefined, 'admin@example.com'), false)
+})
+
+await check('a forwarded message carries no code with it', () => {
+  const hostile = `<p>hi</p><script>fetch('//x')</script>
+    <iframe src="//x"></iframe>
+    <img src=x onerror="alert(1)" />
+    <a href="javascript:alert(1)">tap</a>`
+  const clean = defang(hostile)
+  assert.ok(clean.includes('<p>hi</p>'), 'the message itself survives')
+  assert.ok(!/<script/i.test(clean))
+  assert.ok(!/<iframe/i.test(clean))
+  assert.ok(!/onerror/i.test(clean))
+  assert.ok(!/javascript:/i.test(clean))
+})
+
+await check('a reply cannot be decided without SITE_URL', async () => {
+  reply(`approve${QUOTED}`)
+  const r = await handleInbound(
+    new Request('https://hisaab.example/api/inbound', { method: 'POST', body: EVENT }),
+    { ...env, SITE_URL: '' },
+  )
+  // Approving mints a magic link with a redirect_to built from SITE_URL. Without
+  // it the base would come from this request's own Host header.
+  assert.equal(r.status, 500)
+  assert.equal(accountMade(), false)
 })
 
 await check('a reply about a request already decided says so, quietly', async () => {

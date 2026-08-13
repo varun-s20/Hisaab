@@ -7,7 +7,7 @@ import { clearMapCache } from '../lib/categorise'
 import { loadCategories } from '../lib/categories'
 import { migrate } from '../lib/migrate'
 import { backup, downloadBackup, readBackupFile, restore } from '../lib/export'
-import { forgetKey, keyProblem as geminiKeyProblem, readKey, writeKey } from '../lib/ai'
+import { forgetKey, keyFailure, keyProblem as geminiKeyProblem, readKey, writeKey } from '../lib/ai'
 import ScreenHeader from '../components/ScreenHeader.jsx'
 import ByoSetup from './ByoSetup.jsx'
 
@@ -101,7 +101,7 @@ export default function Storage({ onBack }) {
     setChoice(kind === live.kind ? null : kind)
   }
 
-  function saveKey() {
+  async function saveKey() {
     setErr(null)
     setDone(null)
     const problem = geminiKeyProblem(geminiKey)
@@ -109,6 +109,18 @@ export default function Storage({ onBack }) {
     // writeKey throws without one, and an unhandled throw out of an onClick is
     // a dead button rather than a message.
     if (!userId) return setErr('Sign in first.')
+
+    // Tried before it is stored. Everything that uses this key fails soft, so a
+    // key Google refuses would have looked exactly like a key that works —
+    // right up until somebody noticed that nothing had been categorised for a
+    // month. One round trip is worth more than the shape check ever was.
+    if (geminiKey) {
+      setBusy('key')
+      const failure = await keyFailure(geminiKey)
+      setBusy(null)
+      if (failure) return setErr(failure)
+    }
+
     writeKey(userId, geminiKey)
     forgetKey() // the in-memory copy in lib/ai.js is now a session behind
     setDone(geminiKey ? 'Saved. The AI now runs on your key.' : 'Cleared. Back to Hisaab’s AI.')
@@ -438,7 +450,7 @@ export default function Storage({ onBack }) {
         </label>
         <p style={{ margin: '4px 0 0' }}>
           <button className="linkish" onClick={saveKey} disabled={Boolean(busy)}>
-            {geminiKey ? 'Save key' : 'Use Hisaab’s AI'}
+            {busy === 'key' ? 'Checking with Google…' : geminiKey ? 'Save key' : 'Use Hisaab’s AI'}
           </button>
         </p>
         <p className="muted" style={{ fontSize: 12, margin: '10px 2px 0', lineHeight: 1.6 }}>

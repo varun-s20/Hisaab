@@ -7,6 +7,8 @@
 
 import assert from 'node:assert/strict'
 import { findFrequent, findRecurring } from '../src/lib/recurring.js'
+import { templateFromRecurring } from '../src/lib/entry.js'
+import { nextDue } from '../src/lib/schedule.js'
 
 let passed = 0
 function check(label, fn) {
@@ -138,6 +140,45 @@ check('four chais in a fortnight are a tile and NOT a subscription', () => {
   const rows = repeat('Chai', 20, 4)
   assert.equal(findFrequent(rows, { now: NOW }).length, 1)
   assert.equal(findRecurring(rows).length, 0, 'a 3-day habit is not a bill')
+})
+
+// ── Turning one into a bill ──────────────────────────────────────────────
+
+const bill = (dates) =>
+  templateFromRecurring(
+    findRecurring(dates.map((d) => txn('Netflix', d, 649)))[0],
+  )
+
+check('a bill lands on the day the payment actually falls on', () => {
+  // The detector predicts the next date in DAYS, because days are all a gap can
+  // tell you: 5 August plus a 30.4-day month is 4 September. Reading the day of
+  // the month off that prediction built a rule for the 4th — a bill a day early
+  // every month, for as long as it was tracked.
+  const t = bill(['2026-06-05', '2026-07-05', '2026-08-05'])
+  assert.equal(t.rule.monthDay, 5)
+  assert.equal(nextDue(t, '2026-08-14'), '2026-09-05')
+})
+
+check('a quarterly bill keeps its date too', () => {
+  const t = bill(['2026-02-05', '2026-05-05', '2026-08-05'])
+  assert.deepEqual(t.rule, { every: 3, unit: 'month', monthDay: 5 })
+  assert.equal(nextDue(t, '2026-08-14'), '2026-11-05')
+})
+
+check('a month-end bill keeps the 31st rather than being clamped forever', () => {
+  // Last seen 31 July. The rule has to say 31, not 30, or every long month
+  // afterwards is a day early and the clamp never lets go.
+  const t = bill(['2026-05-31', '2026-06-30', '2026-07-31'])
+  assert.equal(t.rule.monthDay, 31)
+  assert.equal(nextDue(t, '2026-08-14'), '2026-08-31')
+})
+
+check('a weekly bill still reads its weekday off the predicted date', () => {
+  // Seven days later is the same weekday, so this arithmetic was never wrong
+  // and must not change.
+  const t = bill(['2026-07-26', '2026-08-02', '2026-08-09'])
+  assert.deepEqual(t.rule, { every: 1, unit: 'week', weekday: 0 })
+  assert.equal(nextDue(t, '2026-08-14'), '2026-08-16')
 })
 
 console.log(`\n${passed} checks passed`)

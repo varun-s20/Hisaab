@@ -133,7 +133,11 @@ export default function SignIn() {
     setNote(null) // "sent again" has been overtaken by whatever happens next
     // 'email' covers both templates — a first-time address gets Confirm signup,
     // a returning one gets Magic Link, and the code verifies the same.
-    const { error } = await checkCode(email.trim(), code.trim())
+    //
+    // Lower-cased to match what sendCode asked for. Supabase is case-insensitive
+    // about addresses, so this has never bitten — but the two halves of one
+    // exchange sending two different strings is a trap left lying around.
+    const { error } = await checkCode(email.trim().toLowerCase(), code.trim())
     setBusy(false)
     // Expired and mistyped are the same 403 from the API, and its wording
     // ("Token has expired or is invalid") makes a typo sound unrecoverable.

@@ -1,8 +1,14 @@
 import { useEffect, useMemo, useState } from 'react'
-import { listTransactions } from '../lib/db'
+import { deleteTransactions, listAccounts, listMethods, listTransactions, updateTransactions } from '../lib/db'
 import { money, dayLabel, today, spendTotal, earnTotal, investTotal } from '../lib/format'
+import { TYPE_OPTIONS, DIRECTIONS } from '../lib/categories'
+import { download, toCSV } from '../lib/csv'
+import { bulkPatch } from '../lib/entry'
 import { makeRange } from '../lib/range'
+import CategoryPicker from '../components/CategoryPicker.jsx'
 import RangePicker from '../components/RangePicker.jsx'
+import Select from '../components/Select.jsx'
+import Sheet from '../components/Sheet.jsx'
 import { Bar, RowsSkeleton } from '../components/Skeleton.jsx'
 import { Row } from './Today.jsx'
 
@@ -19,25 +25,6 @@ const FILTERS = [
 const isOut = (r) => r.type === 'expense'
 const isIn = (r) => r.type === 'income' || r.type === 'refund' || r.type === 'repaid'
 
-function csv(rows) {
-  const head = ['date', 'time', 'payee', 'category', 'type', 'direction', 'amount']
-  // Quoting stops the field breaking the row; it does not stop Excel and
-  // LibreOffice evaluating one that opens with a formula lead-in. A payee is
-  // whatever name the other side typed into their own UPI app, read off a
-  // screenshot, so =HYPERLINK(...) is a thing that can arrive. The apostrophe
-  // makes the cell text, which is all these ever were.
-  const esc = (v) => {
-    const s = String(v ?? '')
-    return `"${(/^[=+\-@\t\r]/.test(s) ? `'${s}` : s).replace(/"/g, '""')}"`
-  }
-  const body = rows.map((r) =>
-    [r.txn_date, r.txn_time ?? '', r.payee_clean || r.payee_raw, r.category ?? '', r.type, r.direction, r.amount]
-      .map(esc)
-      .join(','),
-  )
-  return [head.join(','), ...body].join('\n')
-}
-
 export default function Ledger({ onChange }) {
   const [mode, setMode] = useState('month')
   const [anchor, setAnchor] = useState(today)
@@ -46,6 +33,12 @@ export default function Ledger({ onChange }) {
   const [q, setQ] = useState('')
   const [rows, setRows] = useState([])
   const [loaded, setLoaded] = useState(false)
+  const [selecting, setSelecting] = useState(false)
+  const [picked, setPicked] = useState(() => new Set())
+  const [editing, setEditing] = useState(false)
+  const [confirming, setConfirming] = useState(false)
+  const [working, setWorking] = useState(false)
+  const [err, setErr] = useState('')
 
   const range = useMemo(() => makeRange(mode, anchor, custom), [mode, anchor, custom])
 
@@ -96,18 +89,70 @@ export default function Ledger({ onChange }) {
     return [...m.entries()]
   }, [shown])
 
+  // What is selected AND still on screen. Derived rather than pruned in an
+  // effect, so narrowing the search or stepping to another month can never
+  // leave a count standing for rows nobody can see — every figure and every
+  // action below is about the list in front of you.
+  const chosen = useMemo(() => shown.filter((r) => picked.has(r.id)), [shown, picked])
+
   async function refresh() {
     setRows(await fetchRows())
     onChange?.()
   }
 
+  function leaveSelection() {
+    setSelecting(false)
+    setPicked(new Set())
+    setErr('')
+  }
+
+  function toggle(id) {
+    setPicked((p) => {
+      const next = new Set(p)
+      if (!next.delete(id)) next.add(id)
+      return next
+    })
+  }
+
+  const allChosen = shown.length > 0 && chosen.length === shown.length
+
+  function toggleAll() {
+    setPicked(allChosen ? new Set() : new Set(shown.map((r) => r.id)))
+  }
+
+  /** Run a write over the selection, then reload and drop out of selection
+   *  mode. Failing leaves the selection alone — the rows are still picked and
+   *  the button can be pressed again. */
+  async function apply(job) {
+    if (chosen.length === 0) return
+    setWorking(true)
+    setErr('')
+    try {
+      await job(chosen.map((r) => r.id))
+      await refresh()
+      leaveSelection()
+    } catch (e) {
+      setErr(e.message ?? String(e))
+    } finally {
+      setWorking(false)
+      setConfirming(false)
+      setEditing(false)
+    }
+  }
+
+  /**
+   * The same writer and the same download the Import screen uses.
+   *
+   * This screen had a second copy of both, and the copy was worse in four ways
+   * that only show up on somebody else's machine: no BOM, so Excel on Windows
+   * read ₹ and every Devanagari merchant name as mojibake; an anchor that was
+   * never in the document, which Safari ignores outright; the object URL revoked
+   * synchronously after .click(), which races the download; and a narrower set
+   * of columns, so a note and a transfer's destination were dropped. lib/csv.js
+   * is also the shape lib/statement.js can read back in.
+   */
   function exportCsv() {
-    const url = URL.createObjectURL(new Blob([csv(shown)], { type: 'text/csv;charset=utf-8' }))
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `hisaab-${range.from}-to-${range.to}.csv`
-    a.click()
-    URL.revokeObjectURL(url)
+    download(toCSV(shown), `hisaab-${range.from}-to-${range.to}.csv`)
   }
 
   return (
@@ -184,6 +229,41 @@ export default function Ledger({ onChange }) {
         )}
       </div>
 
+      {/* The way into selection, and the count once you are in it. A button
+          rather than a long-press: a gesture nothing on screen mentions is a
+          feature only the person who built it knows about, and it has no
+          keyboard equivalent. */}
+      {loaded && shown.length > 0 && (
+        <div className="listbar">
+          {selecting ? (
+            <>
+              <span className="muted">
+                {chosen.length} of {shown.length} selected
+              </span>
+              <span>
+                <button className="linkish" onClick={toggleAll}>
+                  {allChosen ? 'Select none' : 'Select all'}
+                </button>
+                <button className="linkish quiet" style={{ marginLeft: 14 }} onClick={leaveSelection}>
+                  Done
+                </button>
+              </span>
+            </>
+          ) : (
+            <>
+              <span className="muted">
+                {shown.length} row{shown.length === 1 ? '' : 's'}
+              </span>
+              <button className="linkish" onClick={() => setSelecting(true)}>
+                Select
+              </button>
+            </>
+          )}
+        </div>
+      )}
+
+      {err && <p className="alert" style={{ fontSize: 14 }}>{err}</p>}
+
       {/* Stepping back a month over a slow connection used to leave the whole
           page below the search box blank, which is indistinguishable from a
           month with nothing in it. */}
@@ -213,7 +293,14 @@ export default function Ledger({ onChange }) {
           </div>
           <ul className="ledger">
             {list.map((r) => (
-              <Row key={r.id} r={r} onChange={refresh} />
+              <Row
+                key={r.id}
+                r={r}
+                onChange={refresh}
+                selectable={selecting}
+                selected={picked.has(r.id)}
+                onToggle={toggle}
+              />
             ))}
           </ul>
         </div>
@@ -226,6 +313,170 @@ export default function Ledger({ onChange }) {
           </button>
         </p>
       )}
+
+      {/* Docked, because the selection is made by scrolling and the actions
+          have to stay reachable from wherever that ends. Padding below the list
+          keeps the last row off the bar. */}
+      {selecting && chosen.length > 0 && (
+        <>
+          <div style={{ height: 88 }} aria-hidden="true" />
+          <div className="bulkbar">
+            <button className="btn small" disabled={working} onClick={() => setEditing(true)}>
+              Edit {chosen.length}
+            </button>
+            <button className="btn ghost small" disabled={working} onClick={() => setConfirming(true)}>
+              Delete {chosen.length}
+            </button>
+          </div>
+        </>
+      )}
+
+      {/* Mounted always, opened by the flag. A sheet unmounted the instant its
+          action finishes never runs its own close, and the history entry it
+          pushed to make the Back button work outlives it — one dead press of
+          Back for every bulk delete. Same reason EditSheet holds itself open
+          through the exit. */}
+      <Sheet open={confirming} onClose={() => setConfirming(false)} title="Delete these rows">
+        <p className="muted" style={{ fontSize: 14, lineHeight: 1.7, margin: '0 0 6px' }}>
+          {chosen.length} row{chosen.length === 1 ? '' : 's'} worth{' '}
+          <span className="num">₹{money(chosen.reduce((s, r) => s + (Number(r.amount) || 0), 0))}</span>{' '}
+          will be removed from the ledger. It can&rsquo;t be undone.
+        </p>
+        <div className="danger-actions" style={{ marginTop: 18 }}>
+          <button className="btn ghost small" onClick={() => setConfirming(false)}>
+            Leave them
+          </button>
+          <button
+            className="btn small destructive"
+            disabled={working}
+            onClick={() => apply((ids) => deleteTransactions(ids))}
+          >
+            {working ? 'Deleting…' : `Delete ${chosen.length}`}
+          </button>
+        </div>
+      </Sheet>
+
+      <BulkSheet
+        open={editing}
+        count={chosen.length}
+        busy={working}
+        onClose={() => setEditing(false)}
+        onApply={(patch) => apply((ids) => updateTransactions(ids, patch))}
+      />
     </div>
+  )
+}
+
+/**
+ * One patch, many rows.
+ *
+ * Every field starts on "leave unchanged" and only what you set is sent — the
+ * alternative is a form pre-filled from one of the selected rows, which quietly
+ * writes that row's method onto the other thirty-nine.
+ *
+ * Setting a category also clears the review flag, the same as fixing one row
+ * does in the ledger drawer: a category you chose by hand is not a guess the
+ * app is unsure about. Nothing else clears it, because setting an account says
+ * nothing about whether the category was right.
+ */
+function BulkSheet({ open, count, busy, onClose, onApply }) {
+  const [d, setD] = useState({ category: '', type: '', direction: '', method: '', account: '' })
+  const [accounts, setAccounts] = useState([])
+  const [methods, setMethods] = useState([])
+
+  useEffect(() => {
+    if (!open) return
+    setD({ category: '', type: '', direction: '', method: '', account: '' })
+    listAccounts().then(setAccounts).catch(() => {})
+    listMethods().then(setMethods).catch(() => {})
+  }, [open])
+
+  const set = (k, v) => setD((p) => ({ ...p, [k]: v }))
+
+  // Built in lib/entry.js, not here: the couplings it enforces — direction
+  // follows type, a row that stops being a transfer loses its destination —
+  // are the ones every other write path in the app already applies, and they
+  // are worth a test of their own.
+  const patch = bulkPatch(d)
+  const touched = Object.keys(patch).length > 0
+
+  const UNCHANGED = { value: '', label: 'Leave unchanged' }
+
+  return (
+    <Sheet open={open} onClose={onClose} title={`Edit ${count} row${count === 1 ? '' : 's'}`}>
+      <p className="muted" style={{ fontSize: 13, lineHeight: 1.7, margin: '0 0 16px' }}>
+        Whatever you set here replaces that field on all {count}. Anything left alone stays as it is.
+      </p>
+
+      {/* Every other control here has a "Leave unchanged" row in its own sheet.
+          The category picker has no such entry — it is the same component the
+          add form uses, where an empty choice is not a thing you can make — so a
+          category tapped by mistake could not be taken back without closing the
+          sheet and starting again. The undo goes beside it rather than into the
+          picker, which eight other screens share. */}
+      <div className="field">
+        <span>
+          Category
+          {d.category && (
+            <button
+              type="button"
+              className="linkish quiet"
+              style={{ marginLeft: 10, fontSize: 12 }}
+              onClick={() => set('category', '')}
+            >
+              Leave unchanged
+            </button>
+          )}
+        </span>
+        <CategoryPicker
+          compact
+          value={d.category}
+          placeholder="Leave unchanged"
+          onChange={(c) => set('category', c)}
+        />
+      </div>
+
+      <div className="pair">
+        <Select
+          label="Type"
+          value={d.type}
+          placeholder="Leave unchanged"
+          options={[UNCHANGED, ...TYPE_OPTIONS]}
+          onChange={(v) => set('type', v)}
+        />
+        <Select
+          label="Direction"
+          value={d.direction}
+          placeholder="Leave unchanged"
+          options={[UNCHANGED, ...DIRECTIONS]}
+          onChange={(v) => set('direction', v)}
+        />
+      </div>
+
+      <div className="pair">
+        <Select
+          label="Paid with"
+          value={d.method}
+          placeholder="Leave unchanged"
+          options={[UNCHANGED, ...methods]}
+          onChange={(v) => set('method', v)}
+          allowNew
+          newLabel="New method"
+        />
+        <Select
+          label="Account"
+          value={d.account}
+          placeholder="Leave unchanged"
+          options={[UNCHANGED, ...accounts]}
+          onChange={(v) => set('account', v)}
+          allowNew
+          newLabel="New account"
+        />
+      </div>
+
+      <button className="btn" disabled={busy || !touched} onClick={() => onApply(patch)}>
+        {busy ? 'Saving…' : touched ? `Apply to ${count} row${count === 1 ? '' : 's'}` : 'Nothing set yet'}
+      </button>
+    </Sheet>
   )
 }

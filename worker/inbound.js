@@ -86,6 +86,39 @@ async function verified(secret, headers, rawBody) {
   return false
 }
 
+// ── Who sent it ──────────────────────────────────────────────────────────
+
+/**
+ * The address out of a From header, lower-cased, with any plus-tag removed.
+ *
+ * `Hisaab <hello@example.com>` → `hello@example.com`, and
+ * `k+phone@example.com` → `k@example.com`, so the admin writing from an alias
+ * of their own still counts as the admin.
+ */
+const mailbox = (header) => {
+  const raw = (String(header ?? '').match(/<([^>]*)>/)?.[1] ?? String(header ?? '')).trim().toLowerCase()
+  const at = raw.lastIndexOf('@')
+  if (at < 1) return ''
+  const local = raw.slice(0, at).split('+')[0]
+  return `${local}${raw.slice(at)}`
+}
+
+/**
+ * Is this mail from the admin?
+ *
+ * An exact comparison of the *address*, never a substring of the header. The
+ * header carries a display name the sender chooses, so `includes` — which is
+ * what this used to be — matched a stranger who simply named themselves after
+ * the admin: `"k@example.com" <attacker@elsewhere.test>` passed it. That check
+ * is the backstop for a decision address that has leaked (a forwarded thread, a
+ * screenshot of an inbox), which is precisely the situation where somebody is
+ * already choosing what their headers say.
+ */
+export const sameMailbox = (header, address) => {
+  const a = mailbox(header)
+  return Boolean(a) && a === mailbox(address)
+}
+
 // ── Reading a one-word reply ─────────────────────────────────────────────
 
 /**
@@ -158,11 +191,35 @@ const detag = (html) =>
     .replace(/&nbsp;/g, ' ')
 
 /**
- * The forwarded message. Their body is passed through as-is under a banner
- * rather than poured into the branded template: a forward that reformats the
- * mail is worse at being a forward, and wrapping attacker-authored HTML in our
- * markup only invites it to break out of it. The banner is escaped and comes
- * first, so an unclosed tag in their half cannot swallow it.
+ * Take the executable parts out of a stranger's HTML before it is forwarded.
+ *
+ * Mail clients do most of this already — none of them run a <script> tag. That
+ * is a reason to keep the mail readable, not a reason for this Worker to be the
+ * thing that hands the payload over: Resend renders what we send, the admin's
+ * client is one setting away from being more permissive than assumed, and the
+ * whole point of forwarding is that somebody opens it.
+ *
+ * Deliberately blunt. This is not a sanitiser and must not be mistaken for one
+ * — it removes the tags that carry code and the attributes that carry handlers,
+ * and leaves the formatting alone. A forward that reformats the mail is worse
+ * at being a forward.
+ */
+export const defang = (html) =>
+  String(html ?? '')
+    .replace(/<\s*(script|iframe|object|embed|form|base|meta|link)\b[\s\S]*?<\s*\/\s*\1\s*>/gi, '')
+    // …and the same tags written without a closing half.
+    .replace(/<\s*(script|iframe|object|embed|form|base|meta|link)\b[^>]*>/gi, '')
+    // Inline handlers: onclick=, onerror=, quoted or bare.
+    .replace(/\son[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+    // javascript: in an href or a src.
+    .replace(/(href|src|action)\s*=\s*(["']?)\s*javascript:[^"'\s>]*/gi, '$1=$2#')
+
+/**
+ * The forwarded message. Their body is passed through under a banner rather
+ * than poured into the branded template: a forward that reformats the mail is
+ * worse at being a forward, and wrapping attacker-authored HTML in our markup
+ * only invites it to break out of it. The banner is escaped and comes first, so
+ * an unclosed tag in their half cannot swallow it.
  */
 const wrap = ({ from, to, subject, html, text, attachments }) => `
   <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:13px;line-height:1.6;color:#6a6c6a;padding:12px 14px;background:#f1f1ed;border-radius:10px;">
@@ -179,7 +236,7 @@ const wrap = ({ from, to, subject, html, text, attachments }) => `
   </div>
   <hr style="border:0;border-top:1px solid #e4e4e1;margin:18px 0;" />
   ${
-    html ||
+    defang(html) ||
     `<pre style="white-space:pre-wrap;font-family:inherit;">${escapeHtml(
       text ?? '(empty message)',
     )}</pre>`
@@ -196,7 +253,14 @@ export async function handleInbound(request, env) {
   if (request.method !== 'POST') {
     return new Response('POST only', { status: 405 })
   }
-  if (!env.RESEND_WEBHOOK_SECRET || !env.RESEND_API_KEY || !env.ADMIN_EMAIL || !env.MAIL_FROM) {
+  // SITE_URL among them: a reply can approve somebody, and approving sends a
+  // magic link whose redirect_to is built from it. Falling back to this
+  // request's own origin would let the Host header decide where a sign-in link
+  // lands. See canNotify in worker/access.js.
+  if (
+    !env.RESEND_WEBHOOK_SECRET || !env.RESEND_API_KEY || !env.ADMIN_EMAIL ||
+    !env.MAIL_FROM || !env.SITE_URL
+  ) {
     console.error('[inbound] secrets missing — cannot forward')
     return new Response('not configured', { status: 500 })
   }
@@ -232,7 +296,7 @@ export async function handleInbound(request, env) {
   const email = await got.json()
 
   const from = email?.from ?? 'unknown sender'
-  const byAdmin = String(from).toLowerCase().includes(String(env.ADMIN_EMAIL).toLowerCase())
+  const byAdmin = sameMailbox(from, env.ADMIN_EMAIL)
 
   // ── A reply that decides ──────────────────────────────────────────────
   //
@@ -243,17 +307,14 @@ export async function handleInbound(request, env) {
     // The id is unguessable and lives only in the admin's mailbox, so this is
     // belt and braces — but a From header costs nothing to check, and a token
     // that leaks (a forwarded thread, a screenshot) should not be enough on its
-    // own to let someone into the app.
-    //
-    // ponytail: `includes`, so an alias like admin+phone@ or a display name
-    // still matches. Tighten to an exact address compare if the admin address
-    // ever becomes something a stranger could contrive to appear inside.
+    // own to let someone into the app. See sameMailbox: the address, compared
+    // exactly, never the header it arrived in.
     if (!byAdmin) {
       console.warn('[inbound] a decision address was replied to by somebody else')
       return new Response('ignored', { status: 200 })
     }
 
-    const site = (env.SITE_URL || new URL(request.url).origin).replace(/\/$/, '')
+    const site = String(env.SITE_URL).replace(/\/$/, '')
     const decision = readDecision(email?.text || detag(email?.html))
     const said = decision ? await decideByReply(env, id, decision, site) : SAY_AGAIN
 

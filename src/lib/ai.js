@@ -56,6 +56,28 @@ export function keyProblem(key) {
   return null
 }
 
+/**
+ * Ask Google one trivial question with this key, before it is saved.
+ *
+ * A shape check proves nothing that matters. Everything downstream of a key
+ * fails soft by design — an unrecognised merchant stays unrecognised, Ask falls
+ * back to the local parser — so a key that Google refuses, or an origin the
+ * page's own CSP will not let us reach, produces no error anywhere: the app
+ * simply stops using AI and says nothing. The settings screen was reporting
+ * "the AI now runs on your key" on the strength of the string starting AIza.
+ *
+ * Returns null if it works, or a sentence for the screen.
+ */
+export async function keyFailure(key) {
+  const parsed = await callGemini({
+    apiKey: String(key ?? '').trim(),
+    prompt: categorisePrompt(['SWIGGY'], ['Food & Dining', 'Other']),
+    label: 'key check',
+  })
+  if (Array.isArray(parsed) && parsed.length > 0) return null
+  return 'Google did not accept that key. Check it was copied whole, and that it is enabled for the Generative Language API.'
+}
+
 // The key is held in memory for the length of a session so every call does not
 // hit localStorage. Cleared with everything else when the user changes.
 let cached = { userId: null, key: null }

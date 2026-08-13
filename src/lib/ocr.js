@@ -1,5 +1,3 @@
-import { createWorker } from 'tesseract.js'
-
 let workerPromise = null
 
 // Everything is served from our own origin. By default tesseract.js pulls its
@@ -21,8 +19,17 @@ const LOCAL = {
 
 // One worker, reused across the whole batch. Creating one per image is the
 // classic performance bug — it re-inits WASM every time.
-function getWorker() {
-  if (!workerPromise) workerPromise = createWorker('eng', 1, LOCAL)
+//
+// tesseract.js is imported here rather than at the top of the file, and that is
+// the whole point of the async: statically imported it lands in the entry chunk,
+// so the bytes that read a screenshot were parsed before the sign-in screen
+// could paint — on the one screen that has no screenshot on it. Today calls
+// preload() 400ms after mount, so the fetch still happens while somebody is
+// reading the page and the first drop is still warm.
+async function getWorker() {
+  if (!workerPromise) {
+    workerPromise = import('tesseract.js').then(({ createWorker }) => createWorker('eng', 1, LOCAL))
+  }
   return workerPromise
 }
 

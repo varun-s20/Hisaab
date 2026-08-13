@@ -141,6 +141,14 @@ export function urlProblem(input) {
   if (u.pathname !== '/' && u.pathname !== '') {
     return 'Just the project ID, or the plain project URL with nothing after the host.'
   }
+  // The app's own Content-Security-Policy names the hosts the browser is
+  // allowed to reach (index.html): Supabase's own domain, and a project running
+  // on this machine. Anything else is refused by the browser at the moment of
+  // the first request — long after this screen said the connection was fine,
+  // with an error that reads as the project being down. Say so here instead.
+  if (!loopback && !u.hostname.endsWith('.supabase.co')) {
+    return 'Hisaab can only reach a project on supabase.co, or one running on this machine. Use the project URL Supabase gives you rather than a custom domain.'
+  }
   return null
 }
 

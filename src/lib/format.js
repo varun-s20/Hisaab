@@ -19,6 +19,13 @@ export function daysInMonth(d = new Date()) {
   return new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate()
 }
 
+/** The last day of the month, as a date rather than a count. Day 0 of the next
+ *  month is the last of this one, so February and leap years need no special
+ *  case. What "committed before month end" measures against. */
+export function endOfMonth(d = new Date()) {
+  return iso(new Date(d.getFullYear(), d.getMonth() + 1, 0))
+}
+
 const DAY_FMT = new Intl.DateTimeFormat('en-IN', { weekday: 'short', day: 'numeric', month: 'short' })
 
 export function dayLabel(isoDate) {

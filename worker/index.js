@@ -186,7 +186,14 @@ export default {
     try {
       // Whichever finishes first: a handler that returns without writing (it
       // cannot, today) would otherwise hang the request forever.
-      await Promise.race([handler(req, res).then(() => sent), sent])
+      //
+      // The handler promise is raced as itself. It used to be
+      // `handler(req, res).then(() => sent)`, which resolves *with* `sent` and
+      // therefore chains onto it — so both arms of the race were the same
+      // never-settling promise and the guard this comment describes was not
+      // there at all. A handler that returns without writing now falls through
+      // to toResponse(), which answers 200 with an empty body.
+      await Promise.race([handler(req, res), sent])
     } catch (e) {
       console.error('[worker]', e?.message ?? e)
       return new Response(JSON.stringify({ error: 'upstream failed' }), {

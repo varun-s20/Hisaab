@@ -6,9 +6,10 @@
 
 import assert from 'node:assert/strict'
 import {
-  addDays, committedPerMonth, describeRule, isDue, nextDue, nextOccurrence, occurrencesPerMonth,
-  pendingOccurrences, ruleProblem,
+  addDays, committedBetween, committedPerMonth, describeRule, isDue, nextDue, nextOccurrence,
+  occurrencesDueBy, occurrencesPerMonth, pendingOccurrences, ruleProblem,
 } from '../src/lib/schedule.js'
+import { endOfMonth } from '../src/lib/format.js'
 
 let passed = 0
 function check(label, fn) {
@@ -211,6 +212,167 @@ check('occurrences a month follow the stride', () => {
 check('addDays crosses a month and a year', () => {
   assert.equal(addDays('2026-02-28', 1), '2026-03-01')
   assert.equal(addDays('2026-01-01', -1), '2025-12-31')
+})
+
+// ── What is owed before a date, and what it costs ──────────────────────────
+//
+// "₹28,649 committed before the 31st" is a different question from "₹22,689 a
+// month". The monthly figure is an average over a whole cadence; this one is a
+// count of actual dates in a window, and rent on the 5th contributes nothing to
+// it on the 6th.
+
+check('the month end is the last day, February and leap years included', () => {
+  assert.equal(endOfMonth(new Date(2026, 7, 13)), '2026-08-31')
+  assert.equal(endOfMonth(new Date(2026, 1, 1)), '2026-02-28')
+  assert.equal(endOfMonth(new Date(2028, 1, 1)), '2028-02-29')
+  assert.equal(endOfMonth(new Date(2026, 3, 30)), '2026-04-30')
+})
+
+check('every date a bill still owes on or before a horizon', () => {
+  const t = { rule: monthly(5), starts_on: '2026-08-05' }
+  assert.deepEqual(occurrencesDueBy(t, '2026-08-31'), ['2026-08-05'])
+  assert.deepEqual(occurrencesDueBy(t, '2026-10-31'), ['2026-08-05', '2026-09-05', '2026-10-05'])
+  // The day before it starts owes nothing at all.
+  assert.deepEqual(occurrencesDueBy(t, '2026-08-04'), [])
+})
+
+check('a bill already confirmed this month owes nothing more this month', () => {
+  const t = { rule: monthly(5), starts_on: '2026-01-05', last_posted_on: '2026-08-05' }
+  assert.deepEqual(occurrencesDueBy(t, '2026-08-31'), [])
+  assert.deepEqual(occurrencesDueBy(t, '2026-09-30'), ['2026-09-05'])
+})
+
+check('months left unconfirmed are still owed, and counted once each', () => {
+  // Rent unconfirmed since June. Three payments are outstanding on 31 August,
+  // not one — and not four, which is what a walk that forgot to stop looks like.
+  const t = { rule: monthly(5), starts_on: '2026-06-05' }
+  assert.deepEqual(occurrencesDueBy(t, '2026-08-31'), ['2026-06-05', '2026-07-05', '2026-08-05'])
+})
+
+check('a bill that has ended owes nothing past its end date', () => {
+  const t = { rule: { ...monthly(5), until: '2026-08-31' }, starts_on: '2026-08-05' }
+  assert.deepEqual(occurrencesDueBy(t, '2026-12-31'), ['2026-08-05'])
+})
+
+check('a tile has no schedule and therefore owes nothing', () => {
+  assert.deepEqual(occurrencesDueBy({ payee: 'Chai', amount: 20 }, '2026-12-31'), [])
+})
+
+check('a daily repeat is capped rather than allowed to run away', () => {
+  const t = { rule: { every: 1, unit: 'day' }, starts_on: '2020-01-01' }
+  assert.equal(occurrencesDueBy(t, '2026-08-31').length, 200)
+  assert.equal(occurrencesDueBy(t, '2026-08-31', { cap: 5 }).length, 5)
+})
+
+check('a window moves the anchor, so the cap is not spent outside it', () => {
+  // A daily repeat anchored in 2020 owes over two thousand dates. Asked for
+  // August alone, a walk that filtered afterwards would burn all 200 of its cap
+  // on 2020 and answer "nothing due in August" — a zero that looks like a fact.
+  const t = { rule: { every: 1, unit: 'day' }, starts_on: '2020-01-01' }
+  const august = occurrencesDueBy(t, '2026-08-31', { from: '2026-08-01' })
+  assert.equal(august.length, 31)
+  assert.equal(august[0], '2026-08-01')
+  assert.equal(august.at(-1), '2026-08-31')
+})
+
+check('a window never reaches back past what has already been confirmed', () => {
+  // Confirmed on the 5th. Asking about the whole month must not re-offer it
+  // just because the window opens on the 1st.
+  const t = { rule: monthly(5), starts_on: '2026-01-05', last_posted_on: '2026-08-05' }
+  assert.deepEqual(occurrencesDueBy(t, '2026-08-31', { from: '2026-08-01' }), [])
+})
+
+check('what is committed between now and a date', () => {
+  // Every bill here is up to date, so each contributes only the dates that
+  // genuinely fall before the 31st. A bill with a backlog is the case below.
+  const bills = [
+    { amount: 18000, direction: 'debit', rule: monthly(5), starts_on: '2026-01-05', last_posted_on: '2026-07-05' },
+    { amount: 649, direction: 'debit', rule: monthly(28), starts_on: '2026-01-28', last_posted_on: '2026-07-28' },
+    // Falls on the 1st, already confirmed — this month is paid for.
+    { amount: 2000, direction: 'debit', rule: monthly(1), starts_on: '2026-01-01', last_posted_on: '2026-08-01' },
+    // Sundays: 16, 23, 30 August fall in the window. The 9th does not.
+    { amount: 700, direction: 'debit', rule: { every: 1, unit: 'week', weekday: 0 }, starts_on: '2026-08-16' },
+    // Renews in March, so it costs nothing before this month is out.
+    { amount: 12000, direction: 'debit', rule: { every: 1, unit: 'year', monthDay: 1 }, starts_on: '2026-03-01', last_posted_on: '2026-03-01' },
+    { amount: 5000, direction: 'debit', rule: monthly(9), starts_on: '2026-08-09', hidden: true },
+    { amount: 400, direction: 'debit', rule: null }, // a tile
+    // Salary. Money arriving is not a commitment.
+    { amount: 80000, direction: 'credit', rule: monthly(30), starts_on: '2026-08-30' },
+    // The maid. Real, due twice before month end, and there is no figure to add.
+    { amount: null, direction: 'debit', rule: { every: 2, unit: 'week', weekday: 6 }, starts_on: '2026-08-15' },
+  ]
+  const c = committedBetween(bills, '2026-08-31')
+  assert.equal(c.total, 18000 + 649 + 700 * 3)
+  assert.equal(c.count, 3) // rent, the 28th, and the one that falls three Sundays
+  assert.equal(c.unknown, 1) // the maid, named but not counted
+})
+
+check('only spending is committed, because only spending is what is left of a budget', () => {
+  // Every "left this month" figure in the app is a budget minus spendTotal, and
+  // spendTotal counts expenses and nothing else. A committed total that also
+  // counted an SIP and a move into an envelope would be subtracted from a
+  // figure that never included them — the free number would read low by the
+  // whole of someone's savings, every month.
+  const bills = [
+    { amount: 18000, direction: 'debit', type: 'expense', rule: monthly(5), starts_on: '2026-08-05' },
+    { amount: 10000, direction: 'debit', type: 'investment', rule: monthly(6), starts_on: '2026-08-06' },
+    { amount: 20000, direction: 'debit', type: 'transfer', rule: monthly(7), starts_on: '2026-08-07' },
+    { amount: 3000, direction: 'debit', type: 'lent', rule: monthly(8), starts_on: '2026-08-08' },
+  ]
+  const c = committedBetween(bills, '2026-08-31')
+  assert.equal(c.total, 18000)
+  assert.equal(c.count, 1)
+})
+
+check('a repeat with no type stated is spending, the same as a row with none', () => {
+  const bills = [{ amount: 500, direction: 'debit', rule: monthly(5), starts_on: '2026-08-05' }]
+  assert.equal(committedBetween(bills, '2026-08-31').total, 500)
+})
+
+check('a salary is not a commitment, whichever figure is asked for', () => {
+  // Money arriving on the 30th every month. committedPerMonth counted it, so a
+  // ledger with the salary set up as a repeat reported ₹80,000 a month of
+  // commitments that were the opposite of one.
+  const salary = [{ amount: 80000, direction: 'credit', type: 'income', rule: monthly(30) }]
+  assert.equal(committedPerMonth(salary, '2026-08-13'), 0)
+  assert.equal(committedBetween(salary, '2026-08-31').total, 0)
+})
+
+check('a bill nobody has confirmed for months is committed for every one of them', () => {
+  // The honest answer and the uncomfortable one: rent unconfirmed since June is
+  // three payments owed, and a figure that showed one would be understating the
+  // month by ₹36,000. This is the unwindowed question — "what does this bill
+  // still owe, all of it" — which is what the Due now list is built from.
+  const behind = [{ amount: 18000, direction: 'debit', rule: monthly(5), starts_on: '2026-06-05' }]
+  assert.equal(committedBetween(behind, '2026-08-31').total, 54000)
+})
+
+check('asked about one month, a backlog is counted apart from it', () => {
+  // The same rent, asked the question the Today screen actually asks: what does
+  // AUGUST cost. One rent, not three. June's and July's have been and gone —
+  // they were very probably paid, and they were counted against their own
+  // months, so subtracting them from what is left of August is the same rupee
+  // taken twice. They are not swallowed either: `overdue` names them.
+  const behind = [{ amount: 18000, direction: 'debit', rule: monthly(5), starts_on: '2026-06-05' }]
+  const c = committedBetween(behind, '2026-08-31', { from: '2026-08-01' })
+  assert.equal(c.total, 18000)
+  assert.equal(c.count, 1)
+  assert.equal(c.overdue, 1)
+})
+
+check('a bill that is up to date is not reported as overdue', () => {
+  const fine = [
+    { amount: 18000, direction: 'debit', rule: monthly(5), starts_on: '2026-01-05', last_posted_on: '2026-07-05' },
+  ]
+  const c = committedBetween(fine, '2026-08-31', { from: '2026-08-01' })
+  assert.equal(c.total, 18000)
+  assert.equal(c.overdue, 0)
+})
+
+check('nothing scheduled is nothing committed, not a broken figure', () => {
+  const none = { total: 0, count: 0, unknown: 0, overdue: 0 }
+  assert.deepEqual(committedBetween([], '2026-08-31'), none)
+  assert.deepEqual(committedBetween(null, '2026-08-31'), none)
 })
 
 console.log(`\n${passed} checks passed`)

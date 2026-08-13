@@ -62,3 +62,34 @@ export function toCSV(rows) {
   // spreadsheets quietly drop it.
   return `${lines.join('\r\n')}\r\n`
 }
+
+/**
+ * Hand the file to the browser.
+ *
+ * Lives beside the writer rather than in lib/export.js, which is where it used
+ * to be: the Ledger exports a CSV too, and reaching into export.js for this
+ * would drag db.js and the whole migration machinery into the main bundle for
+ * fifteen lines. Nothing here touches the network or a database, same as the
+ * rest of this file. export.js re-exports it, so its own callers are unchanged.
+ *
+ * Every detail below is something that only breaks on somebody else's machine:
+ *
+ *   the BOM      Excel on Windows otherwise reads the file as the system
+ *                codepage, and a merchant name in Devanagari — or a plain ₹ —
+ *                comes out as mojibake. Every other reader ignores it.
+ *   in the tree  Safari ignores a click on an anchor that was never in the
+ *                document, and this app is mostly opened on a phone.
+ *   the timeout  revoking the object URL in the same tick as the click races
+ *                the download that click just started.
+ */
+export function download(csv, name = 'hisaab.csv') {
+  const url = URL.createObjectURL(new Blob([`﻿${csv}`], { type: 'text/csv;charset=utf-8' }))
+  const a = document.createElement('a')
+  a.href = url
+  a.download = name
+  a.style.display = 'none'
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 0)
+}

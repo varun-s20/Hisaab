@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { saveTransactions, listAccounts, listMethods } from '../lib/db'
-import { learn } from '../lib/categorise'
+import { learn, suggestCategory } from '../lib/categorise'
 import { today } from '../lib/format'
 import { TYPE_OPTIONS, DIRECTIONS, COUNTED } from '../lib/categories'
 import {
@@ -73,7 +73,41 @@ export default function ManualEntry({ open, onClose, onSaved, seed = null, title
     listMethods().then(setMethods).catch(() => {})
   }, [])
 
+  // Whether the category on screen was chosen by a person. Until it is, the
+  // payee field is allowed to fill it in — see setPayee.
+  const [categoryTouched, setCategoryTouched] = useState(Boolean(seed?.category))
+
   const set = (k, v) => setD((p) => ({ ...p, [k]: v }))
+
+  /**
+   * Typing who it was paid to also files it, until you say otherwise.
+   *
+   * The screenshot path has always run the cascade (lib/categorise.js); the
+   * form never did, so every typed row landed as 'Other' and turned up in
+   * "Teach me" — where the app offered the answer it already had. Same three
+   * local tiers here, on the keystroke, so the picker is filled in before the
+   * category is even looked at.
+   *
+   * Only while nobody has picked one. A category chosen by hand is a decision
+   * and must survive the next keystroke in the payee field.
+   */
+  function setPayee(payee) {
+    setD((p) => {
+      if (categoryTouched) return { ...p, payee }
+      const suggested = suggestCategory(payee)
+      if (!suggested) return { ...p, payee }
+      return {
+        ...p,
+        payee,
+        category: suggested,
+        // The same coupling setCategory makes below: picking Transfers is what
+        // types a row as a transfer, whoever picked it.
+        ...(!typeTouched && suggested === 'Transfers'
+          ? { type: 'transfer', direction: 'debit' }
+          : {}),
+      }
+    })
+  }
 
   function setType(type) {
     setTypeTouched(true)
@@ -84,6 +118,7 @@ export default function ManualEntry({ open, onClose, onSaved, seed = null, title
   }
 
   function setCategory(category) {
+    setCategoryTouched(true)
     setD((p) => {
       const transfer = !typeTouched && category === 'Transfers'
       return {
@@ -157,7 +192,13 @@ export default function ManualEntry({ open, onClose, onSaved, seed = null, title
       if (!saved && duplicates) return setDup(true)
 
       writeEntryDefaults({ method: d.method, account: d.account })
-      if (d.category) await learn(payee, { category: d.category, payee_clean: payee })
+      // Only a category somebody picked is a lesson. One this form filled in
+      // came out of the map or the seed rules in the first place, so writing it
+      // back teaches nothing — and would stamp a guess as a user correction,
+      // which is the rank that outranks everything else forever after.
+      if (d.category && categoryTouched) {
+        await learn(payee, { category: d.category, payee_clean: payee })
+      }
       finish(() => onSaved?.())
     } catch (e2) {
       setErr(e2.message ?? String(e2))
@@ -192,7 +233,7 @@ export default function ManualEntry({ open, onClose, onSaved, seed = null, title
             required
             maxLength={120}
             value={d.payee}
-            onChange={(e) => set('payee', e.target.value)}
+            onChange={(e) => setPayee(e.target.value)}
             placeholder="Auto, chai, sabzi…"
           />
         </label>

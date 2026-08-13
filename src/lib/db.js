@@ -209,10 +209,30 @@ export async function saveTransactions(txns) {
   return { saved: saved.length, duplicates, unusable, unreadable, rejected, rows: saved }
 }
 
+/**
+ * One patch across many rows. The Ledger's bulk edit, and the single-row edit
+ * underneath it.
+ *
+ * Both routes come through here rather than each calling the backend, because
+ * the cache wipe is the part that is easy to forget and invisible when it is
+ * missed: the account and method lists are derived from the rows and held, so
+ * moving forty rows off a card leaves that card in every picker — and in the
+ * list of names Ask sends to the model — until something else happens to clear
+ * it. Selecting nothing writes nothing rather than sending an empty `in ()`.
+ */
+export async function updateTransactions(ids, patch) {
+  if (!ids?.length) return []
+  const rows = await (await db()).updateTransactions(ids, patch)
+  // `to_account` belongs in this test too: listAccounts reads both sides of a
+  // transfer, so clearing forty destinations — which a bulk retype off
+  // `transfer` does, see lib/entry.js — can empty an envelope out of the pickers
+  // while the held list still offers it.
+  if ('account' in patch || 'method' in patch || 'to_account' in patch) forgetAccounts()
+  return rows
+}
+
 export async function updateTransaction(id, patch) {
-  const backend = await db()
-  const [row] = await backend.updateTransactions([id], patch)
-  if ('account' in patch || 'method' in patch) forgetAccounts()
+  const [row] = await updateTransactions([id], patch)
   return row ?? null
 }
 
@@ -266,7 +286,11 @@ let methodCache = null
 export async function listMethods() {
   if (methodCache) return methodCache
   try {
-    const rows = await (await db()).listAllTransactions({ limit: 2000, columns: ['method'] })
+    // Same window as the balances, which is the figure these names sit beside.
+    // At 2000 they disagreed: an account could hold a balance on the Accounts
+    // screen and be missing from every picker, because the two read different
+    // depths of the same ledger. One column over 5000 rows is a small read.
+    const rows = await (await db()).listAllTransactions({ limit: BALANCE_ROWS, columns: ['method'] })
     methodCache = [...new Set(rows.map((r) => r.method).filter(Boolean))].sort()
     return methodCache
   } catch {
@@ -297,7 +321,7 @@ export async function listAccounts() {
     const backend = await db()
     const wide = backend.capabilities().toAccount
     const rows = await backend.listAllTransactions({
-      limit: 2000,
+      limit: BALANCE_ROWS,
       columns: wide ? ['account', 'to_account'] : ['account'],
     })
     const seen = new Set()
@@ -305,7 +329,14 @@ export async function listAccounts() {
       if (r.account) seen.add(r.account)
       if (r.to_account) seen.add(r.to_account)
     }
-    accountCache = [...seen].sort()
+    const names = [...seen].sort()
+    // Not cached if the read itself is what discovered the column is missing.
+    // The Supabase backend starts out assuming it is there and only learns
+    // otherwise from a query that fails, so the first call of a session can come
+    // back without a single envelope in it — and held, that half-answer would be
+    // every picker's list until something else wrote a row.
+    if (wide && !backend.capabilities().toAccount) return names
+    accountCache = names
     return accountCache
   } catch {
     // Degrades rather than throws: EditSheet asks for this, and a database that
@@ -347,15 +378,21 @@ export const BALANCE_ROWS = 5000
  */
 const REWRITE_ROWS = 50_000
 
+const NEEDS_TO_ACCOUNT = 'Run db/migrate-accounts.sql — this screen needs the to_account column.'
+
 export async function accountBalances() {
   const backend = await db()
-  if (!backend.capabilities().toAccount) {
-    throw new Error('Run db/migrate-accounts.sql — this screen needs the to_account column.')
-  }
+  if (!backend.capabilities().toAccount) throw new Error(NEEDS_TO_ACCOUNT)
   const rows = await backend.listAllTransactions({
     limit: BALANCE_ROWS,
     columns: ['account', 'to_account', 'amount', 'direction', 'type'],
   })
+  // Asked again, because the read is what finds out. The Supabase backend
+  // assumes the column is there until a query says otherwise, so the check above
+  // passes optimistically on the first call of a session and the rows come back
+  // carrying no destinations at all — every transfer IN missing, which reads on
+  // screen as money that vanished. A balance nobody can compute has to say so.
+  if (!backend.capabilities().toAccount) throw new Error(NEEDS_TO_ACCOUNT)
 
   const acc = new Map()
   const at = (name) => {

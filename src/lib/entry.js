@@ -58,6 +58,41 @@ export const seedFromRow = (r) => ({
   note: r.note ?? '',
 })
 
+/**
+ * One patch for many rows, from a form where every field starts on "leave
+ * unchanged". Only what was set is sent.
+ *
+ * The two couplings are the same ones EditSheet and ManualEntry enforce on a
+ * single row, and they matter more here because a bulk edit is where nobody
+ * checks the result:
+ *
+ *   direction follows type — retyping ten rows as refunds and leaving them
+ *   `debit` drops them out of every total AND keeps accountBalances taking the
+ *   money out of the account, with a minus still on screen. Wrong in three
+ *   places, flagged in none. Setting direction yourself still wins: a refund
+ *   onto a credit card really is money out of the card.
+ *
+ *   a row that stops being a transfer loses its destination — otherwise the
+ *   stale `to_account` sits there inert until someone types the row back to a
+ *   transfer, and an envelope is credited by a payment that no longer goes
+ *   there.
+ */
+export function bulkPatch(d) {
+  const patch = {}
+  for (const k of ['category', 'type', 'direction', 'method', 'account']) {
+    if (d[k]) patch[k] = d[k]
+  }
+  if (patch.type && !patch.direction && NATURAL_DIRECTION[patch.type]) {
+    patch.direction = NATURAL_DIRECTION[patch.type]
+  }
+  if (patch.type && patch.type !== 'transfer') patch.to_account = null
+  // A category chosen by hand is not something the parser is unsure about.
+  // Nothing else clears the flag: naming the account says nothing about
+  // whether the category was right.
+  if (patch.category) patch.needs_review = false
+  return patch
+}
+
 /** A saved repeat — a tile or a bill — as the form's starting point. */
 export const seedFromTemplate = (t, { on = today() } = {}) => ({
   ...blankEntry(),
@@ -83,17 +118,40 @@ export const seedFromTemplate = (t, { on = today() } = {}) => ({
  * null, because nothing has been confirmed through the bill yet. The payments
  * that revealed the pattern are already in the ledger and are not re-posted.
  */
+/**
+ * Which date each cadence takes its anchor from, and they are not the same one.
+ *
+ * findRecurring predicts `next` by adding the cadence's average length in DAYS
+ * to the last sighting, because days are all a gap between two payments can tell
+ * you. That is exact for a weekday — seven or fourteen days later is the same
+ * day of the week — and wrong for a day of the month, because months are not
+ * 30.4 days long. Netflix charged on 5 August is predicted for 4 September, and
+ * a rule built off that date says "the 4th, every month" — a bill a day early,
+ * every month, for as long as it is tracked. Quarterly drifts the same way and
+ * yearly does it in leap years.
+ *
+ * So the calendar cadences take their day of the month from `last`, which is a
+ * date the payment genuinely happened on, and the weekly ones keep taking their
+ * weekday from `next`, where the arithmetic is exact.
+ */
 const CADENCE_RULE = {
-  weekly: (d) => ({ every: 1, unit: 'week', weekday: d.getDay() }),
-  fortnightly: (d) => ({ every: 2, unit: 'week', weekday: d.getDay() }),
-  monthly: (d) => ({ every: 1, unit: 'month', monthDay: d.getDate() }),
-  quarterly: (d) => ({ every: 3, unit: 'month', monthDay: d.getDate() }),
-  yearly: (d) => ({ every: 1, unit: 'year', monthDay: d.getDate() }),
+  weekly: (next) => ({ every: 1, unit: 'week', weekday: next.getDay() }),
+  fortnightly: (next) => ({ every: 2, unit: 'week', weekday: next.getDay() }),
+  monthly: (next, last) => ({ every: 1, unit: 'month', monthDay: last.getDate() }),
+  quarterly: (next, last) => ({ every: 3, unit: 'month', monthDay: last.getDate() }),
+  yearly: (next, last) => ({ every: 1, unit: 'year', monthDay: last.getDate() }),
+}
+
+const asDate = (iso) => {
+  const [y, m, d] = String(iso).split('-').map(Number)
+  return new Date(y, m - 1, d)
 }
 
 export function templateFromRecurring(f) {
-  const [y, m, day] = f.next.split('-').map(Number)
-  const anchor = new Date(y, m - 1, day)
+  const next = asDate(f.next)
+  // `next` again when there is no last sighting to read, which findRecurring
+  // never produces — it needs three of them — but a hand-built object might.
+  const last = f.last ? asDate(f.last) : next
   return {
     label: f.name.slice(0, 40),
     payee: f.name,
@@ -104,7 +162,10 @@ export function templateFromRecurring(f) {
     method: f.method ?? null,
     account: f.account ?? null,
     note: null,
-    rule: CADENCE_RULE[f.cadence]?.(anchor) ?? null,
+    rule: CADENCE_RULE[f.cadence]?.(next, last) ?? null,
+    // Still the predicted date, so the first occurrence this schedules is the
+    // one the detector was already showing. The rule above is what puts it on
+    // the right day; this only says when to start looking.
     starts_on: f.next,
     last_posted_on: null,
     pinned: false,
