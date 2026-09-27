@@ -95,8 +95,11 @@ export function extractDirection(clean) {
 // ── Payee ────────────────────────────────────────────────────────────────────
 // Layout is vertical: a label line, then the name on the next line — or the
 // name inline after the label. Handle both.
+//
+// Word-bounded both sides. Without it the bare "to" matched inside words —
+// "Automatic Payment" gave a payee of "matic Payment".
 const PAYEE_INLINE =
-  /(?:paid to|sent to|payment to|received from|money sent to|to)\s*[:\-]?\s*(.+)$/i
+  /\b(?:paid to|sent to|payment to|received from|money sent to|to)\b\s*[:\-]?\s*(.+)$/i
 const PAYEE_LABEL = /^(?:paid to|sent to|payment to|received from|to|from)\s*[:\-]?\s*$/i
 
 const NOISE =
@@ -433,8 +436,7 @@ function matchAmount(line) {
 /** The verb sits on the amount line (Paytm) or the line above it (PhonePe). */
 const VERB = /(received from|credited|money received|paid to|sent to|debited|paid|sent)/i
 
-export function parseHistory(text, now = new Date()) {
-  const app = detectListApp(text) ?? 'unknown'
+export function parseHistory(text, now = new Date(), app = detectListApp(text) ?? 'unknown') {
   const paytm = app === 'paytm'
   const lines = text.split('\n').map((l) => l.trim()).filter(Boolean)
 
@@ -558,6 +560,36 @@ function listDate(day, monthName, headerYear, now) {
 }
 
 /**
+ * A history screen recognised by its rows, because its header is not there.
+ *
+ * The header is the first thing to scroll away: every screenshot after the
+ * first one down a long list has no "Balance & History" or "Search
+ * transactions" on it. Those used to fall through to the receipt parser, which
+ * reads a whole list as one payment — seven transactions became a single
+ * flagged row with a stray number for an amount.
+ *
+ * Paytm's row shape is tried first, since "Paid on 09 Aug, 10:11 PM" is
+ * unambiguous. Then the bare date lines GPay and PhonePe use. Either one has to
+ * produce two rows with an amount. A receipt carries one date and one amount,
+ * so it can never reach two, and still goes to `parse` as it always did.
+ */
+function parseListByShape(text, now) {
+  const isList = (rows) => rows.filter((r) => r.amount != null).length >= 2
+
+  const paytm = parseHistory(text, now, 'paytm')
+  if (isList(paytm)) return paytm
+
+  // Named by whatever app the text mentions, for the method column. "Credited
+  // to Paytm" on a PhonePe screen names Paytm, and a screen that failed the
+  // Paytm shape is not a Paytm screen.
+  const named = detectApp(text)
+  const dated = parseHistory(text, now, named === 'paytm' ? 'unknown' : named)
+  if (isList(dated)) return dated
+
+  return null
+}
+
+/**
  * One screenshot in, one or more transactions out.
  * History screens yield many rows; a single receipt yields one.
  */
@@ -569,5 +601,5 @@ export function parseScreenshot(text, now = new Date()) {
     // receipt.
     if (rows.length > 0) return rows
   }
-  return [parse(text, now)]
+  return parseListByShape(text, now) ?? [parse(text, now)]
 }

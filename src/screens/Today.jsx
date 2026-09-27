@@ -4,7 +4,7 @@ import { parseScreenshot } from '../lib/parse'
 import { categoriseBatch, persistAILearnings, learn } from '../lib/categorise'
 import {
   saveTransactions, listTransactions, updateTransaction, deleteTransaction, listBudgets,
-  listTemplates, postTemplate, TOTAL_BUDGET,
+  listTemplates, postTemplate, removeTemplate, saveTemplate, TOTAL_BUDGET,
 } from '../lib/db'
 import {
   money, iso, today, dayLabel, timeLabel, spendTotal, startOfMonth, daysInMonth, endOfMonth,
@@ -12,7 +12,7 @@ import {
 import { TYPE_OPTIONS } from '../lib/categories'
 import { findFrequent, FREQUENT_WINDOW } from '../lib/recurring'
 import { committedBetween, isDue, pendingOccurrences } from '../lib/schedule'
-import { seedFromRow, seedFromTemplate, templateFromSuggestion } from '../lib/entry'
+import { dismissal, seedFromRow, seedFromTemplate, templateFromSuggestion } from '../lib/entry'
 import CategoryIcon from '../components/CategoryIcon.jsx'
 import CategoryPicker from '../components/CategoryPicker.jsx'
 import Select from '../components/Select.jsx'
@@ -84,6 +84,8 @@ export default function Today({ onChange, reviewCount, goReview, goRepeats }) {
   const [templates, setTemplates] = useState([])
   const [tapping, setTapping] = useState(null) // the tile mid-write
   const [undo, setUndo] = useState(null) // { id, label } — the last one-tap log
+  // While on, a tap on a tile takes it off Today instead of logging it.
+  const [trimming, setTrimming] = useState(false)
 
   const load = useCallback(async () => {
     // Sixty days, because that is the window the tile suggestions are read over
@@ -268,6 +270,11 @@ export default function Today({ onChange, reviewCount, goReview, goRepeats }) {
     return [...pinned, ...suggested].slice(0, MAX_TILES)
   }, [templates, rows])
 
+  // The last tile gone leaves nothing to be editing.
+  useEffect(() => {
+    if (tiles.length === 0) setTrimming(false)
+  }, [tiles.length])
+
   /**
    * Bills due today or overdue. Nothing posts itself — this is a list of things
    * to confirm, which is the whole difference between a reminder and an app that
@@ -317,6 +324,29 @@ export default function Today({ onChange, reviewCount, goReview, goRepeats }) {
       if (logged) setUndo({ id: logged.id, label: `${t.label} ₹${money(t.amount)}` })
       await load()
       onChange?.()
+    } catch (e) {
+      setResult({ error: e.message ?? String(e) })
+    } finally {
+      setTapping(null)
+    }
+  }
+
+  /**
+   * Take a tile off Today. Payments it already logged stay in the ledger.
+   *
+   * A pinned tile is deleted, as "Delete this repeat" on the Repeats screen
+   * does. A suggestion has no row to delete, so it gets a dismissal instead —
+   * and so does a pin whose habit is still in the ledger, or it would be back
+   * on the next load as a suggestion. A dismissal is listed on Repeats with a
+   * Bring back button, so neither route is a dead end.
+   */
+  async function removeTile(t) {
+    setTapping(t.id ?? t.payee)
+    try {
+      if (t.id) await removeTemplate(t.id)
+      const suggested = findFrequent(rows).some((s) => sameName(s.payee, t.payee))
+      if (!t.id || suggested) await saveTemplate(dismissal(t.payee))
+      await loadTemplates()
     } catch (e) {
       setResult({ error: e.message ?? String(e) })
     } finally {
@@ -425,22 +455,41 @@ export default function Today({ onChange, reviewCount, goReview, goRepeats }) {
         )}
 
         {tiles.length > 0 && (
-          <div className="quicktiles" role="group" aria-label="Log something you buy often">
-            {tiles.map((t) => (
-              <button
-                key={t.id ?? t.payee}
-                type="button"
-                className="tile-add"
-                disabled={tapping != null}
-                aria-busy={tapping === (t.id ?? t.payee)}
-                onClick={() => tapTile(t)}
-              >
-                <span className="nm">{t.label}</span>
-                <span className="num">
-                  {t.amount == null ? 'Amount…' : `₹${money(t.amount)}`}
-                </span>
+          <div className="tilegroup">
+            <div
+              className={`quicktiles${trimming ? ' trimming' : ''}`}
+              role="group"
+              aria-label={trimming ? 'Remove tiles from Today' : 'Log something you buy often'}
+            >
+              {tiles.map((t) => (
+                <button
+                  key={t.id ?? t.payee}
+                  type="button"
+                  className="tile-add"
+                  disabled={tapping != null}
+                  aria-busy={tapping === (t.id ?? t.payee)}
+                  aria-label={trimming ? `Remove ${t.label} from Today` : undefined}
+                  onClick={() => (trimming ? removeTile(t) : tapTile(t))}
+                >
+                  <span className="nm">{t.label}</span>
+                  {trimming ? (
+                    <span className="rm">Remove</span>
+                  ) : (
+                    <span className="num">
+                      {t.amount == null ? 'Amount…' : `₹${money(t.amount)}`}
+                    </span>
+                  )}
+                </button>
+              ))}
+            </div>
+            {/* The only way to take a tile off used to be More → Repeats → the
+                tile → Delete this repeat, and nothing on this screen said so. */}
+            <p className="tilesedit">
+              {trimming && <span className="muted">Tap one to take it off Today.</span>}
+              <button type="button" className="linkish quiet" onClick={() => setTrimming((v) => !v)}>
+                {trimming ? 'Done' : 'Edit tiles'}
               </button>
-            ))}
+            </p>
           </div>
         )}
 

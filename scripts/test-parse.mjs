@@ -317,6 +317,23 @@ check('a single receipt still parses as one row', () => {
   assert.equal(rows[0].amount, 450)
 })
 
+check('a list scrolled past its header is still a list', () => {
+  // Every screenshot after the first one down a long list has lost its header.
+  // Those were read as one receipt: a single flagged row, a stray number for an
+  // amount and "matic Payment" for a payee, in place of five transactions.
+  const same = (r) => [r.payee_raw, r.amount, r.direction, r.txn_date, r.category_hint]
+  const paytm = HISTORY.split('\n').slice(4).join('\n') // no "Balance & History", no "August 2026"
+  assert.deepEqual(parseScreenshot(paytm, NOW).map(same), parseScreenshot(HISTORY, NOW).map(same))
+  const gpay = GPAY.split('\n').slice(3).join('\n') // no "Search transactions"
+  assert.deepEqual(parseScreenshot(gpay, NOW).map(same), parseScreenshot(GPAY, NOW).map(same))
+})
+
+check('"to" is a word, not two letters inside one', () => {
+  assert.equal(extractPayee(['Automatic Payment']), null)
+  assert.equal(extractPayee(['Tomato Store ₹40']), null)
+  assert.equal(extractPayee(['To: Chai Point']), 'Chai Point')
+})
+
 // The statement importer ships its own checks; run them from the same command.
 const { selfTest } = await import('../src/lib/statement.js')
 check('statement CSV parser', () => {
